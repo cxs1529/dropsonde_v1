@@ -33,7 +33,7 @@
  *    - When enabled, `wifi_manager_task` boots the Wi-Fi AP and HTTP server.
  *    - The web interface (`index.html`) renders a NOAA-approved telemetry dashboard.
  *    - JavaScript polls `/api/live` every 500ms to update the telemetry grid asynchronously.
- *    - Supports HTTP file downloads, reading directly in browser tabs, and file deletion.
+ *    - Includes REST endpoints for file deletion (with built-in active file protection).
  * 
  * 4. FreeRTOS TASK PRIORITIES:
  *    - Priority 10 (Highest) : `gps_rx_task` (Must never miss UART bytes)
@@ -57,16 +57,21 @@
 
 static const char *TAG = "MAIN";
 
-// Instantiate shared global structures declared in config.h exactly once here
+// Instantiate shared global structures declared in config.h exactly once here.
+// These variables reside in the ESP32's internal RAM.
 QueueHandle_t gps_queue = NULL;
 SemaphoreHandle_t live_data_mutex = NULL;
 gps_msg_t live_gps_data = {0}; 
 bool live_is_logging = false;
+char live_active_file[32] = ""; 
 
 /** 
  * @brief Configure physical switch pins with internal pull-ups.
- * Internal pull-ups (`GPIO_PULLUP_ENABLE`) ensure pins read HIGH (1) when floating.
- * Connecting the pin to GND pulls it LOW (0), triggering our ACTIVE state.
+ * 
+ * @details
+ * Internal pull-ups (`GPIO_PULLUP_ENABLE`) ensure the pins read HIGH (1) 
+ * when nothing is connected. When you toggle a physical switch connected 
+ * to GND, it pulls the voltage LOW (0), which acts as our "ON" signal.
  */
 static void init_switches(void) {
     gpio_config_t io_conf = {
@@ -96,7 +101,7 @@ void app_main(void) {
     // 2. Setup Hardware and Storage
     init_switches();
     if (init_sd_card() == ESP_OK) {
-        cleanup_orphaned_metadata(); // Clean up unused .META files
+        cleanup_orphaned_metadata(); // Clean up unused .META files if user manually deleted logs
     }
     init_wifi_base(); 
 

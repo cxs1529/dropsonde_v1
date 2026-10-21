@@ -1,12 +1,14 @@
 /**
  * ==============================================================================
  * @file    gps_parser.c
- * @brief   Implementation of GPS UART reading, NMEA parsing, and RTC syncing.
+ * @brief   GPS UART communication, NMEA parsing, and RTC clock sync.
  * 
  * @details
- * This file acts as the primary PRODUCER in our system. It continuously reads
- * bytes from UART1, detects sentences ending in \n, and uses minmea to parse them.
- * It also maintains the internal system clock (RTC) using accurate satellite time.
+ * This file acts as the primary PRODUCER in our FreeRTOS architecture.
+ * It continuously polls the UART hardware buffer to retrieve bytes sent by the GPS.
+ * Because a complete GPS dataset requires multiple NMEA sentences (GGA for quality, 
+ * GSA for PDOP, RMC for location), this module caches fragments in a local state 
+ * structure until the RMC sentence arrives, which triggers the final payload generation.
  * ==============================================================================
  */
 
@@ -24,9 +26,7 @@
 #define BUF_SIZE (1024)
 
 /** 
- * @brief Local state cache preserving values across different NMEA sentences.
- * GPS modules spread data across multiple sentences. We cache PDOP (from GSA) 
- * and Fix Quality (from GGA) here until the RMC sentence arrives with the location.
+ * @brief Internal cache to hold GPS data between different NMEA sentences.
  */
 typedef struct {
     float pdop;         ///< Position Dilution of Precision (multiplicative error factor)
@@ -45,8 +45,7 @@ static void handle_gga_sentence(const char *line) {
     struct minmea_sentence_gga frame;
     // Attempt to parse line into GGA structure
     if (minmea_parse_gga(&frame, line)) {
-        // Save quality: 0=invalid, 1=GPS fix, 2=DGPS fix
-        current_gps.fix_quality = frame.fix_quality;
+        current_gps.fix_quality = frame.fix_quality; // Save quality: 0=invalid, 1=GPS fix, 2=DGPS fix
     }
 }
 
@@ -56,14 +55,12 @@ static void handle_gga_sentence(const char *line) {
  */
 static void handle_gsa_sentence(const char *line) {
     struct minmea_sentence_gsa frame;
-    // Attempt to parse line into GSA structure
     if (minmea_parse_gsa(&frame, line)) {
-        // minmea uses scaled integers for memory safety. Convert to float if scale exists.
+        // minmea uses scaled integers for memory safety. Convert to float only if scale exists.
         if (frame.pdop.scale != 0) {
             current_gps.pdop = minmea_tofloat(&frame.pdop);
         }
-        // Save fix dimension: 1=none, 2=2D, 3=3D
-        current_gps.fix_type = frame.fix_type;
+        current_gps.fix_type = frame.fix_type; // Save fix dimension: 1=none, 2=2D, 3=3D
     }
 }
 
@@ -85,7 +82,7 @@ static void generate_rtc_dummy_message(void) {
     strcpy(msg.fix_desc, "No fix");
     
     // Check if system clock has been synced at least once since boot (Year 1970 check)
-    if (timeinfo.tm_year > 100) { // tm_year counts years since 1900. 2026 - 1900 = 126
+    if (timeinfo.tm_year > 100) { // tm_year counts years since 1900. (2026 - 1900 = 126)
         msg.year = timeinfo.tm_year - 100; // Convert to 2-digit format (126 -> 26)
         msg.month = timeinfo.tm_mon + 1;   // Convert POSIX 0-11 range to 1-12 range
         msg.day = timeinfo.tm_mday;
@@ -101,8 +98,8 @@ static void generate_rtc_dummy_message(void) {
         msg.lat, msg.lon, msg.pdop, msg.fix_type, msg.fix_desc
     );
     
-    // Dispatch to consumer queue. 0 timeout ensures parser never blocks if queue is full.
-    xQueueSend(gps_queue, &msg, 0);
+    // Dispatch to consumer queue. Timeout = 0 ensures parser never blocks if queue is full.
+    xQueueSend(gps_queue, &msg, 0); 
 }
 
 /** 
@@ -145,7 +142,7 @@ static bool handle_rmc_sentence(const char *line) {
         msg.lat = minmea_tocoord(&frame.latitude);
         msg.lon = minmea_tocoord(&frame.longitude);
         
-        // Safety checks for math failures
+        // Safety checks to prevent math failures if coordinates are corrupt
         if (isnan(msg.lat)) msg.lat = 0.0;
         if (isnan(msg.lon)) msg.lon = 0.0;
         
@@ -183,13 +180,12 @@ static bool handle_rmc_sentence(const char *line) {
 }
 
 /** 
- * @brief Validates NMEA checksums (*6A) and routes sentences to sub-parsers.
+ * @brief Dispatcher that validates checksums and routes the NMEA string to sub-parsers.
  */
 static bool process_nmea_line(const char *line) {
-    // Checksum check: drops sentences corrupted by electrical noise over UART lines
+    // minmea_check performs strict checksum (*6A) validation to drop electrically corrupted lines
     if (!minmea_check(line, false)) return false; 
     
-    // Sentence ID lookup: routes string to correct parser function
     switch (minmea_sentence_id(line, false)) {
         case MINMEA_SENTENCE_GGA: handle_gga_sentence(line); return false;
         case MINMEA_SENTENCE_GSA: handle_gsa_sentence(line); return false;
@@ -211,7 +207,7 @@ static void init_gps_uart(void) {
         .source_clk = UART_SCLK_DEFAULT,
     };
     
-    // Allocate 2KB of internal ESP32 RAM for the background UART RX FIFO ring buffer
+    // Allocate 2KB of internal ESP32 RAM for the background RX FIFO ring buffer
     uart_driver_install(UART_NUM_1, BUF_SIZE * 2, 0, 0, NULL, 0);
     uart_param_config(UART_NUM_1, &uart_config);
     // Route UART1 to physical GPIO pins 6 and 7
@@ -220,6 +216,7 @@ static void init_gps_uart(void) {
 
 /** 
  * @brief Main FreeRTOS task loop for receiving and parsing GPS data.
+ * This runs indefinitely, yielding CPU to other tasks while waiting for new bytes.
  */
 void gps_rx_task(void *arg) {
     init_gps_uart();
@@ -235,6 +232,7 @@ void gps_rx_task(void *arg) {
         
         for (int i = 0; i < length; i++) {
             char c = (char)data[i];
+            
             // If newline encountered, sentence is complete
             if (c == '\n' || c == '\r') {
                 if (line_len > 0) {

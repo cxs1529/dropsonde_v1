@@ -55,7 +55,7 @@
 // =================--- NETWORK CONFIGURATION ---=================
 
 #define WIFI_AP_SSID    "DROPSONDE_WIFI"
-#define WIFI_AP_PASS    "drop33149"      ///< WPA2 Password for the Access Point
+#define WIFI_AP_PASS    "dropsonde"      ///< WPA2 Password for the Access Point
 #define MAX_STA_CONN    4                  ///< Max simultaneous devices connected
 
 
@@ -90,5 +90,6 @@ extern QueueHandle_t gps_queue;            ///< Queue handle transferring teleme
 extern SemaphoreHandle_t live_data_mutex;   ///< Mutex locking live_gps_data during cross-task reads
 extern gps_msg_t live_gps_data;            ///< Shared global variable holding latest telemetry
 extern bool live_is_logging;               ///< Shared global variable holding active logging status
+extern char live_active_file[32];          ///< Shared global variable holding current active filename
 
 #endif // CONFIG_H

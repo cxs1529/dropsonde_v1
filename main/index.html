@@ -18,6 +18,7 @@
         h2 { color: var(--noaa-dark-blue); border-bottom: 3px solid var(--noaa-light-blue); padding-bottom: 10px; margin-top: 0; }
         h3 { color: var(--noaa-dark-blue); }
 
+        /* Dynamic Status Banner */
         .status-banner { padding: 15px; margin-bottom: 20px; border-radius: 5px; font-size: 1.2em; font-weight: bold; text-align: center; color: #fff; transition: background-color 0.4s; }
         .bg-logging { background: var(--noaa-green); }
         .bg-paused { background: var(--noaa-red); }
@@ -30,6 +31,7 @@
         .data-box .label { font-size: 0.8em; color: var(--noaa-dark-blue); font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
         .data-box .value { font-size: 1.4em; font-family: monospace; color: #111; font-weight: bold; margin-top: 8px; display: block; }
         
+        /* Two-Column File Layout */
         .flex-container { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 15px; }
         .table-container { flex: 2; min-width: 300px; }
         .summary-container { flex: 1; min-width: 250px; background: #fff; border: 1px solid #ddd; border-top: 5px solid var(--noaa-light-blue); padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); height: fit-content; }
@@ -86,6 +88,7 @@
     </div>
 
     <script>
+        // fileDataMap stores the metadata for instant UI rendering without hitting the ESP32 twice
         let fileDataMap = {};
 
         function showSummary(fileName) {
@@ -108,17 +111,21 @@
             `;
         }
 
+        // Fetches the directory list and renders the HTML table
         function loadFiles() {
             fetch('/api/list').then(r => r.json()).then(data => {
                 fileDataMap = {};
                 let html = '<tr><th>File Name</th><th>Size</th><th>Actions</th></tr>';
                 data.forEach(f => {
                     fileDataMap[f.name] = f;
+                    
+                    // The delete button is given a unique ID (del-filename) so we can 
+                    // dynamically disable it via the 500ms polling loop if it becomes active.
                     html += `<tr class="file-row" onclick="showSummary('${f.name}')">
                     <td>${f.name}</td><td>${(f.size / 1024).toFixed(1)} KB</td><td>
                     <a href="/view?file=${f.name}" target="_blank" style="color:var(--noaa-green);" onclick="event.stopPropagation()">Read</a> | 
                     <a href="/download?file=${f.name}" onclick="event.stopPropagation()">Download</a> | 
-                    <a href="#" onclick="deleteFile('${f.name}', event)" style="color:var(--noaa-red);">Delete</a></td></tr>`;
+                    <a href="#" id="del-${f.name}" onclick="deleteFile('${f.name}', event)" style="color:var(--noaa-red);">Delete</a></td></tr>`;
                 });
                 document.getElementById('fileTable').innerHTML = html;
                 
@@ -127,34 +134,66 @@
             });
         }
 
+        // Triggers the backend unlink API and safely reloads the UI on success
         function deleteFile(name, event) {
-            event.stopPropagation();
+            event.stopPropagation(); // Prevents the row click (showSummary) from firing
             if(confirm('Permanently delete ' + name + '?')) {
-                fetch('/api/manage?action=delete&file=' + name, {method:'POST'}).then(() => loadFiles());
+                fetch('/api/manage?action=delete&file=' + name, {method:'POST'}).then(response => {
+                    if (response.ok) {
+                        loadFiles();
+                    } else {
+                        alert("Error: Cannot delete the active file while it is mounted.");
+                    }
+                });
             }
         }
 
-        // Live Telemetry Polling (500ms)
+        // --- Asynchronous Telemetry Engine ---
+        // Pings the ESP32 every 500ms to fetch JSON data and inject it into the DOM.
         setInterval(() => {
             fetch('/api/live').then(r => r.json()).then(d => {
-                // Populate the CSS Grid
+                
+                // 1. Populate the CSS Instrument Grid
                 document.getElementById('valTime').innerText = `${d.date} ${d.time}`;
                 document.getElementById('valLat').innerText = d.lat;
                 document.getElementById('valLon').innerText = d.lon;
                 document.getElementById('valPdop').innerText = d.pdop;
                 document.getElementById('valFix').innerText = d.fix;
                 
+                // 2. Update Status Banner with dynamic active filename
                 let banner = document.getElementById('statusBanner');
                 if(d.logging) {
                     banner.className = 'status-banner bg-logging';
-                    banner.innerText = 'STATUS: LOGGING - Recording Dropsonde Data';
+                    banner.innerText = 'STATUS: LOGGING - Recording to ' + d.active_file;
                 } else {
                     banner.className = 'status-banner bg-paused';
                     banner.innerText = 'STATUS: PAUSED - Storage Halted';
                 }
+
+                // 3. File Deletion Safety Mechanism
+                // Loops through all rendered files. If a file is the currently active file, 
+                // the Delete button is grayed out and its click events are disabled via CSS.
+                Object.values(fileDataMap).forEach(f => {
+                    let delBtn = document.getElementById('del-' + f.name);
+                    if (delBtn) {
+                        if (f.name === d.active_file) {
+                            delBtn.style.color = '#aaa';
+                            delBtn.style.pointerEvents = 'none'; // Disables clicking
+                            delBtn.innerText = 'Active';
+                            delBtn.title = 'Cannot delete the active log file';
+                        } else {
+                            delBtn.style.color = 'var(--noaa-red)';
+                            delBtn.style.pointerEvents = 'auto'; // Re-enables clicking
+                            delBtn.innerText = 'Delete';
+                            delBtn.title = 'Permanently delete this file';
+                        }
+                    }
+                });
+
             }).catch(e => {});
         }, 500);
 
+        // Fetch data immediately on first page load
         window.onload = loadFiles;
     </script>
 </body>
