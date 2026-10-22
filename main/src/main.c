@@ -1,45 +1,41 @@
 /**
  * ==============================================================================
  * @file    main.c
- * @brief   Application Entry Point & System Operational Overview.
+ * @brief   Application Entry Point & NOAA Dropsonde Operational Description.
  * 
  * @details
  * DEVICE OPERATIONAL DESCRIPTION:
  * -------------------------------
- * The NOAA/AOML Dropsonde Logger is an industrial-grade embedded telemetry 
- * recorder built around the ESP32-C3 microcontroller.
+ * The NOAA/AOML Dropsonde Logger is an industrial-grade telemetry acquisition 
+ * instrument for oceanic dropsondes built on the ESP32-C3 microcontroller.
  * 
- * 1. DATA INPUT & TIMEKEEPING PIPELINE:
- *    - The GPS module streams NMEA 0183 sentences via UART1 (GPIO 6 RX / 7 TX).
- *    - `gps_rx_task` parses GSA, GGA, and RMC sentences using the `minmea` library.
- *    - RMC frames continuously synchronize the ESP32's internal system clock (RTC).
- *    - If GPS fix is lost or UART goes silent, a 1Hz software timer uses the internal 
- *      RTC to generate a fallback telemetry payload, guaranteeing an unbroken 1Hz log.
- *    - Coordinates are natively converted from DDMM.MMMM to Decimal Degrees (dd.ddd).
+ * 1. CLOCK SYNCHRONIZATION & 1Hz GUARANTEE:
+ *    - The system boot initializes POSIX time to 01/01/70 00:00:00.
+ *    - A 1Hz software timer increments this timestamp continuously.
+ *    - As soon as the u-blox NEO-6M emits an RMC sentence with valid year data 
+ *      (either from internal battery backup or satellite fix), `settimeofday()` 
+ *      instantly locks the ESP32 internal clock to UTC.
+ *    - Fallback records with `00 00.000000N 000 00.000000E` and `FIX TYPE: 0 (no fix)` 
+ *      are generated every second when satellite lock is unavailable.
  * 
- * 2. STORAGE & DEBOUNCE PIPELINE:
- *    - Formatted payloads are sent to `gps_queue`.
- *    - `gps_log_task` reads from the queue and handles SD card storage over SPI DMA.
- *    - Hardware switch GPIO 3 (with 5s debounce) controls logging state.
- *    - File Rotation: Data is saved to `/sdcard/DATA/GPSDATAx.dat`. Pausing for > 60s 
- *      automatically starts a new sequence number file.
- *    - Metadata Caching: Tracks line count, first, and last location records in hidden 
- *      `/.META/GPSDATAx.dat.META` files for instantaneous web server rendering.
- *    - Power Failure Protection: RAM data is buffered in 4KB blocks (`setvbuf`) and 
- *      committed to physical SD flash memory using `fsync()` every 10 seconds.
+ * 2. TWO-LINE DATA LOGGING FORMAT:
+ *    - Every 1-second record writes two lines to the SD file:
+ *        Line 1: MM/DD/YY  HH:MM:SS  DD MM.MMMMMM[N/S]  DDD MM.MMMMMM[E/W]  PDOP: xx.x FIX TYPE: x (desc)
+ *        Line 2: P= 00000  T= 00000  C= 00000
  * 
- * 3. NETWORKING & POWER MANAGEMENT PIPELINE:
- *    - Hardware switch GPIO 2 (with 10s debounce) controls Wi-Fi AP power.
- *    - When enabled, `wifi_manager_task` boots the Wi-Fi AP and HTTP server.
- *    - The web interface (`index.html`) renders a NOAA-approved telemetry dashboard.
- *    - JavaScript polls `/api/live` every 500ms to update the telemetry grid asynchronously.
- *    - Includes REST endpoints for file deletion (with built-in active file protection).
+ * 3. FILE SYSTEM & STORAGE PIPELINE:
+ *    - Data is stored in `/sdcard/DATA/GPSDATA_YYMMDDhhmmss.dat`.
+ *    - Hardware switch GPIO 8 (with 5-second debounce) pauses/resumes logging.
+ *    - Resuming after >60 seconds automatically initiates a new deployment file.
+ *    - A web dashboard button allows triggering a new deployment file on demand.
+ *    - Initial metadata waits for the first valid fix before locking starting position.
+ *    - RAM is buffered in 4KB blocks (`setvbuf`) and synced via `fsync()` every 30 seconds.
  * 
- * 4. FreeRTOS TASK PRIORITIES:
- *    - Priority 10 (Highest) : `gps_rx_task` (Must never miss UART bytes)
- *    - Priority 6            : `gps_log_task` (Handles file I/O & SD debouncing)
- *    - Priority 4            : `wifi_manager_task` (Manages Wi-Fi power transitions)
- *    - Priority 2 (Lowest)  : `gps_tail_task` (Verifies SD contents every 60s)
+ * 4. FreeRTOS TASK ARCHITECTURE:
+ *    - Priority 10: `gps_rx_task` (UART1 reading and NMEA parsing)
+ *    - Priority 6 : `gps_log_task` (SD card file management and debouncing)
+ *    - Priority 4 : `wifi_manager_task` (10s debounced Wi-Fi power control)
+ *    - Priority 2 : `gps_tail_task` (Verification reader running every 60s)
  * ==============================================================================
  */
 
@@ -48,8 +44,8 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
+#include <sys/time.h>
 
-// Include modular components
 #include "config.h"
 #include "gps_parser.h"
 #include "sd_logger.h"
@@ -57,21 +53,16 @@
 
 static const char *TAG = "MAIN";
 
-// Instantiate shared global structures declared in config.h exactly once here.
-// These variables reside in the ESP32's internal RAM.
+// Global handles instantiated once in RAM
 QueueHandle_t gps_queue = NULL;
 SemaphoreHandle_t live_data_mutex = NULL;
 gps_msg_t live_gps_data = {0}; 
 bool live_is_logging = false;
-char live_active_file[32] = ""; 
+char live_active_file[64] = ""; 
+bool force_new_file_flag = false; // Flag signaled by Web UI for new deployments
 
 /** 
- * @brief Configure physical switch pins with internal pull-ups.
- * 
- * @details
- * Internal pull-ups (`GPIO_PULLUP_ENABLE`) ensure the pins read HIGH (1) 
- * when nothing is connected. When you toggle a physical switch connected 
- * to GND, it pulls the voltage LOW (0), which acts as our "ON" signal.
+ * @brief Configures GPIO switches with internal pull-ups (Active LOW).
  */
 static void init_switches(void) {
     gpio_config_t io_conf = {
@@ -84,28 +75,28 @@ static void init_switches(void) {
     gpio_config(&io_conf);
 }
 
-/**
- * @brief The main execution entry point initiated by ESP-IDF.
- */
 void app_main(void) {
-    ESP_LOGI(TAG, "Booting Industrial GPS Logger...");
+    ESP_LOGI(TAG, "Booting NOAA/AOML Dropsonde Logger...");
 
-    // 1. Initialize Non-Volatile Storage (NVS)
-    // Required by the ESP-IDF Wi-Fi driver to store calibration data.
+    // 1. Initialize System Clock to 01/01/70 00:00:00 (Epoch 0)
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+
+    // 2. Initialize Non-Volatile Storage (NVS)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
       ESP_ERROR_CHECK(nvs_flash_erase());
       nvs_flash_init();
     }
 
-    // 2. Setup Hardware and Storage
+    // 3. Initialize Hardware & Storage
     init_switches();
     if (init_sd_card() == ESP_OK) {
-        cleanup_orphaned_metadata(); // Clean up unused .META files if user manually deleted logs
+        cleanup_orphaned_metadata(); 
     }
     init_wifi_base(); 
 
-    // 3. Setup RTOS Synchronization Primitives
+    // 4. Create RTOS Primitives
     live_data_mutex = xSemaphoreCreateMutex();
     gps_queue = xQueueCreate(10, sizeof(gps_msg_t));
 
@@ -122,9 +113,8 @@ void app_main(void) {
         // Priority 4: Background network management state machine
         xTaskCreate(wifi_manager_task, "wifi_mng", 4096, NULL, 4, NULL);
         
-        // Priority 2: Lowest priority verifier task (runs occasionally)
-        xTaskCreate(gps_tail_task, "gps_tail", 4096, NULL, 2, NULL);
-        
+        // Priority 2: Lowest priority verifier task (Increased stack to 8192 for FATFS/SPI)
+        xTaskCreate(gps_tail_task, "gps_tail", 8192, NULL, 2, NULL);
     } else {
         ESP_LOGE(TAG, "CRITICAL ERROR: Failed to create FreeRTOS objects!");
     }

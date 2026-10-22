@@ -1,22 +1,16 @@
 /**
  * ==============================================================================
  * @file    sd_logger.c
- * @brief   SD Card FATFS storage manager, file rotation, and debouncing.
+ * @brief   SD Card FATFS storage manager, file rotation, and two-line logging.
  * 
  * @details
- * This module operates as the CONSUMER in our architecture. It receives messages
- * from `gps_queue` and writes them safely to the physical SD card.
- * 
- * CORE FEATURES:
- * 1. SPI DMA: Uses `SPI_DMA_CH_AUTO` for high-speed hardware memory transfers.
- * 2. Hardware Debouncing: Tracks physical switch states via FreeRTOS ticks. 
- *    Requires the pin to be stable for 5 seconds before opening/closing files.
- * 3. 1-Minute Rule: Pausing logging for >60s automatically increments the sequence 
- *    number to open a fresh `GPSDATAx.dat` file upon resuming.
- * 4. O(1) Metadata: Updates a hidden `.META` file with line counts so the web 
- *    server doesn't have to read massive files just to render the UI.
- * 5. Memory Protection: Uses `setvbuf` for 4KB RAM block buffering and `fsync()` 
- *    every 30s to commit data to physical flash without wearing out the card.
+ * Operates as the CONSUMER task in the FreeRTOS architecture.
+ * - Mounts the FATFS filesystem via SPI using DMA channel auto-allocation.
+ * - Generates filenames dynamically, utilizing index suffixes to prevent overwriting.
+ * - Handles software debouncing (5 seconds) on the hardware switch.
+ * - Executes periodic `fsync()` operations to protect flash memory life.
+ * - Defers filename generation until the exact moment logging begins to allow
+ *   the parser task to synchronize the system RTC in the background first.
  * ==============================================================================
  */
 
@@ -32,26 +26,26 @@
 #include <sys/unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <time.h>
 
 static const char *TAG = "SD_LOG";
 static sdmmc_card_t *sd_card = NULL;
-static char active_log_filename[32] = "";
+static char active_log_filename[64] = "";
 
-/** 
- * @brief Structure caching metadata in internal RAM for the open file.
- * We track total lines to avoid counting `\n` characters on 10MB text files.
+/**
+ * @brief RAM cache tracking file size, limits, and GPS coordinate locks.
  */
 typedef struct {
-    long lines;             ///< Total count of recorded telemetry lines
-    char first_record[64];  ///< Timestamp & position of first log line
-    char last_record[64];   ///< Timestamp & position of latest log line
+    long lines;             ///< Number of payload lines in active file
+    bool first_valid_found; ///< Prevents first_record from updating once a fix is locked
+    char first_record[64];  ///< String representing the deployment drop location
+    char last_record[64];   ///< String representing the most recent telemetry
 } log_meta_t;
 
-static log_meta_t current_meta = {0, "N/A", "N/A"};
+static log_meta_t current_meta = {0, false, "N/A", "N/A"};
 
 /** 
- * @brief Formats a clean, abbreviated metadata summary string for the Web UI.
- * Extracts just Date, Time, and Decimal Degree coordinates from the full payload.
+ * @brief Strips down the full telemetry payload into a compact string for the UI metadata.
  */
 static void extract_metadata_record(gps_msg_t *msg, char* dest) {
     snprintf(dest, 64, "%02d/%02d/%02d %02d:%02d:%02d Lat: %.5f Lon: %.5f", 
@@ -59,7 +53,7 @@ static void extract_metadata_record(gps_msg_t *msg, char* dest) {
 }
 
 /** 
- * @brief Writes RAM metadata structure into the hidden `.META` cache file.
+ * @brief Commits RAM metadata cache to physical SD `.META` file for rapid Web Server reads.
  */
 static void save_metadata(void) {
     if (strlen(active_log_filename) == 0) return;
@@ -67,17 +61,17 @@ static void save_metadata(void) {
     snprintf(meta_path, sizeof(meta_path), "%s/%s.META", META_DIR, active_log_filename);
     FILE *fm = fopen(meta_path, "w");
     if (fm) {
-        // Output format: Line 1 = count, Line 2 = initial record, Line 3 = final record
         fprintf(fm, "%ld\n%s\n%s\n", current_meta.lines, current_meta.first_record, current_meta.last_record);
         fclose(fm);
     }
 }
 
 /** 
- * @brief Restores metadata into RAM if appending/resuming an existing file.
+ * @brief Restores metadata into RAM when a file is reopened (appending).
  */
 static void load_metadata(void) {
     current_meta.lines = 0; 
+    current_meta.first_valid_found = false;
     strcpy(current_meta.first_record, "N/A"); 
     strcpy(current_meta.last_record, "N/A");
     
@@ -88,43 +82,68 @@ static void load_metadata(void) {
     if (fm) {
         char buf[64];
         if (fgets(buf, sizeof(buf), fm)) current_meta.lines = atol(buf);
-        if (fgets(buf, sizeof(buf), fm)) { buf[strcspn(buf, "\r\n")] = '\0'; strncpy(current_meta.first_record, buf, 63); }
-        if (fgets(buf, sizeof(buf), fm)) { buf[strcspn(buf, "\r\n")] = '\0'; strncpy(current_meta.last_record, buf, 63); }
+        if (fgets(buf, sizeof(buf), fm)) { 
+            buf[strcspn(buf, "\r\n")] = '\0'; 
+            strncpy(current_meta.first_record, buf, 63); 
+            // Lock metadata boolean if the previous execution recorded a real coordinate
+            if (strstr(current_meta.first_record, "Lat: 0.00000") == NULL && strlen(current_meta.first_record) > 10) {
+                current_meta.first_valid_found = true;
+            }
+        }
+        if (fgets(buf, sizeof(buf), fm)) { 
+            buf[strcspn(buf, "\r\n")] = '\0'; 
+            strncpy(current_meta.last_record, buf, 63); 
+        }
         fclose(fm);
     }
 }
 
 /** 
- * @brief Scans /sdcard/DATA for `GPSDATAx.dat` files and increments index x.
- * Ensures that rebooting the system never overwrites past data.
+ * @brief Creates a chronological filename using system RTC (synced from GPS background).
+ * Includes collision protection (appending _1, _2) to prevent accidental data overwrites.
  */
-static void get_next_filename(char *filename_out, size_t max_len) {
-    DIR *dir = opendir(DATA_DIR);
-    int max_index = 0;
-    if (dir != NULL) {
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL) {
-            int current_index = 0;
-            // Parse NOAA format: GPSDATA1.dat, GPSDATA2.dat
-            if (sscanf(ent->d_name, "GPSDATA%d.dat", &current_index) == 1) {
-                if (current_index > max_index) max_index = current_index;
-            }
+static void get_timestamp_filename(char *filename_out, size_t max_len) {
+    time_t now; 
+    time(&now);
+    struct tm timeinfo; 
+    gmtime_r(&now, &timeinfo);
+    
+    int year = (timeinfo.tm_year >= 70) ? (timeinfo.tm_year % 100) : 70;
+    char base_name[64];
+    snprintf(base_name, sizeof(base_name), "GPSDATA_%02d%02d%02d%02d%02d%02d",
+             year, timeinfo.tm_mon + 1, timeinfo.tm_mday,
+             timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    
+    char candidate[128]; // Increased buffer size to satisfy GCC truncation checks
+    snprintf(candidate, sizeof(candidate), "%s.dat", base_name);
+    
+    char full_path[256];
+    snprintf(full_path, sizeof(full_path), "%s/%s", DATA_DIR, candidate);
+    
+    struct stat st;
+    if (stat(full_path, &st) != 0) {
+        strncpy(filename_out, candidate, max_len); // Path does not exist, safe to use
+    } else {
+        // File collision detected. Iterate suffix until an open slot is found.
+        int suffix = 1;
+        while (1) {
+            snprintf(candidate, sizeof(candidate), "%s_%d.dat", base_name, suffix);
+            snprintf(full_path, sizeof(full_path), "%s/%s", DATA_DIR, candidate);
+            if (stat(full_path, &st) != 0) break;
+            suffix++;
         }
-        closedir(dir);
+        strncpy(filename_out, candidate, max_len);
     }
-    // Return next filename in sequence
-    snprintf(filename_out, max_len, "GPSDATA%d.dat", max_index + 1);
 }
 
 /**
- * @brief Mounts the physical SD card via the SPI bus.
- * @return ESP_OK on success, ESP_FAIL on wiring or format errors.
+ * @brief Mounts the physical FATFS SD card over SPI.
  */
 esp_err_t init_sd_card(void) {
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false, // Do not auto-format to preserve data
+        .format_if_mount_failed = false, // Critical: Never format user's data autonomously
         .max_files = 5, 
-        .allocation_unit_size = 16 * 1024 // 16KB clusters optimize FAT access
+        .allocation_unit_size = 16 * 1024
     };
     
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
@@ -137,28 +156,25 @@ esp_err_t init_sd_card(void) {
         .max_transfer_sz = 4000,
     };
     
-    // SPI_DMA_CH_AUTO forces ESP32-C3 to automatically assign an available DMA channel
     if (spi_bus_initialize(host.slot, &bus_cfg, SPI_DMA_CH_AUTO) != ESP_OK) return ESP_FAIL;
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = PIN_NUM_CS; 
     slot_config.host_id = host.slot;
 
-    // Mount physical SD card to virtual POSIX path /sdcard
     if (esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &sd_card) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to mount SD card. Check wiring and FAT32 format.");
         return ESP_FAIL;
     }
     
     ESP_LOGI(TAG, "SD Card mounted successfully.");
-    mkdir(DATA_DIR, 0777); // Ensure user data folder exists
-    mkdir(META_DIR, 0777); // Ensure hidden system metadata folder exists
+    mkdir(DATA_DIR, 0777); 
+    mkdir(META_DIR, 0777); 
     return ESP_OK;
 }
 
 /**
- * @brief Automatically deletes metadata for files the user removed via PC.
- * Maintains the 1:1 relationship between raw logs and .META cache files.
+ * @brief Deletes `.META` cache files if the user manually deleted the raw `.dat` file via PC.
  */
 void cleanup_orphaned_metadata(void) {
     DIR *dir = opendir(META_DIR);
@@ -173,12 +189,11 @@ void cleanup_orphaned_metadata(void) {
             strncpy(base_name, ent->d_name, base_len); 
             base_name[base_len] = '\0';
             
-            // Check if corresponding raw log file exists in /DATA
             char data_path[300]; 
             snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, base_name);
             struct stat st;
             
-            // stat() fails if the file doesn't exist -> delete the orphan .META file
+            // If stat fails, the raw file is missing. Delete the orphan metadata.
             if (stat(data_path, &st) != 0) {
                 char meta_path[300]; 
                 snprintf(meta_path, sizeof(meta_path), "%s/%s", META_DIR, ent->d_name);
@@ -191,156 +206,197 @@ void cleanup_orphaned_metadata(void) {
 }
 
 /** 
- * @brief Main RTOS Task for consuming queue data and writing to the SD Card.
- * 
- * @details
- * This loop manages the 5-second software debouncing. When the pin changes state,
- * it waits 5000 milliseconds to verify the switch isn't bouncing. If validated, 
- * it triggers file system opens/closes and executes 30-second fsync intervals.
+ * @brief Main RTOS logger loop (Switch debounce, file I/O, flash protection)
  */
 void gps_log_task(void *arg) {
     gps_msg_t msg; 
     FILE *f = NULL;
     
-    // FreeRTOS timers for state machines
     TickType_t last_sync_time = xTaskGetTickCount();
+    TickType_t last_meta_sync_time = xTaskGetTickCount(); 
     TickType_t pause_start_tick = 0, resume_start_tick = 0;   
     TickType_t actual_pause_time = 0, last_reminder_tick = 0;  
     
     bool logical_logging_state = false; 
     bool last_physical_state = (gpio_get_level(LOG_SWITCH_PIN) == 0);
-    bool threshold_warned = false; // Tracks if threshold warning was already printed
+    bool threshold_warned = false; 
 
-    if (sd_card != NULL) get_next_filename(active_log_filename, sizeof(active_log_filename));
+    // Note: get_timestamp_filename is intentionally omitted at boot.
+    // By waiting until the switch actually turns on to query the time, 
+    // the background GPS parser has time to lock onto satellites and sync the OS RTC.
 
     while (1) {
-        // Wait up to 1000ms for queue messages. The timeout ensures our software timers 
-        // keep executing even if the GPS loses lock and the queue runs dry.
         BaseType_t received = xQueueReceive(gps_queue, &msg, pdMS_TO_TICKS(1000));
         TickType_t current_time = xTaskGetTickCount();
-        
-        // Read raw switch state (Internal pull-up means LOW = Switch CLOSED/ON)
         bool physical_switch_is_logging = (gpio_get_level(LOG_SWITCH_PIN) == 0);
 
-        // --- Edge Detection Terminal Output ---
+        // --- DASHBOARD OVERRIDE: FORCE NEW FILE ---
+        if (force_new_file_flag) {
+            force_new_file_flag = false; // Reset trigger
+            if (f != NULL) {
+                fflush(f);
+                fsync(fileno(f));
+                fclose(f);
+                f = NULL;
+                save_metadata();
+            }
+            get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
+            ESP_LOGI(TAG, "New Deployment Triggered! Active File: %s", active_log_filename);
+            
+            if (logical_logging_state && sd_card != NULL) {
+                char data_path[128];
+                snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, active_log_filename);
+                f = fopen(data_path, "a");
+                if (f != NULL) {
+                    setvbuf(f, NULL, _IOFBF, 4096); // Re-establish 4KB buffer on new file
+                    load_metadata();
+                    last_sync_time = current_time; 
+                    last_meta_sync_time = current_time;
+                            
+                    // Print immediate feedback so you don't wait 30s blind
+                    printf("\n  [LOGGING INITIATED : %s]\n\n", active_log_filename);
+                    fflush(stdout);                    
+                }
+            }
+        }
+
+        // --- EDGE DETECTION TERMINAL OUTPUT ---
         if (physical_switch_is_logging && !last_physical_state) {
             printf("\n>>> LOG SWITCH ACTIVE. Waiting 5s to validate...\n\n");
         } else if (!physical_switch_is_logging && last_physical_state) {
             printf("\n>>> LOG SWITCH PAUSED. Waiting 5s to validate...\n\n");
-            threshold_warned = false; // Reset 60-second warning flag
+            threshold_warned = false; 
         }
         last_physical_state = physical_switch_is_logging;
 
-        // --- 5-Second Debouncing & State Machine ---
+        // --- STATE MACHINE: SWITCH IS OFF (PAUSED) ---
         if (!physical_switch_is_logging) {
-            resume_start_tick = 0; // Reset opposite timer
-            
+            resume_start_tick = 0; 
             if (logical_logging_state) {
                 if (pause_start_tick == 0) pause_start_tick = current_time;
                 
-                // Validate switch remained physically OFF for 5000ms continuously
+                // If switch remains physically OFF for 5000ms continuously: Halt Logging
                 if ((current_time - pause_start_tick) >= pdMS_TO_TICKS(5000)) {
                     logical_logging_state = false;
                     actual_pause_time = current_time; 
                     last_reminder_tick = current_time; 
                     
                     if (f != NULL) {
-                        fflush(f);        // Flush C-library RAM cache
-                        fsync(fileno(f)); // Force physical SD Flash sync
+                        fflush(f); // Push C-lib RAM cache to driver
+                        fsync(fileno(f)); // Commit driver sector to physical flash memory
                         fclose(f); 
                         f = NULL;
-                        save_metadata();  // Save line counts to disk
+                        save_metadata(); 
                         ESP_LOGI(TAG, "Logging stopped and secured.");
                     }
                 }
             } else {
-                // Currently in PAUSED state. Evaluate elapsed duration.
+                // Tracking total paused duration to trigger warnings
                 uint32_t elapsed_pause_sec = (current_time - actual_pause_time) * portTICK_PERIOD_MS / 1000;
                 
-                // Print explicit warning if the 60-second threshold is crossed
                 if (actual_pause_time > 0 && elapsed_pause_sec >= 60 && !threshold_warned) {
-                    char next_file[32]; 
-                    get_next_filename(next_file, sizeof(next_file));
+                    char next_file[64]; 
+                    get_timestamp_filename(next_file, sizeof(next_file));
                     printf("\n*** PAUSE THRESHOLD EXCEEDED (%lu seconds). Resuming logging will create NEW FILE: %s ***\n\n", 
                            (unsigned long)elapsed_pause_sec, next_file);
                     threshold_warned = true;
                 }
-
-                // Print console reminder every 30 seconds with total elapsed pause duration
+                
                 if ((current_time - last_reminder_tick) >= pdMS_TO_TICKS(30000)) {
                     printf("--- REMINDER: Logging PAUSED for %lu seconds. Flip switch to resume. ---\n", 
                            (unsigned long)elapsed_pause_sec);
                     last_reminder_tick = current_time;
                 }
             }
+            
+        // --- STATE MACHINE: SWITCH IS ON (LOGGING) ---
         } else {
             pause_start_tick = 0; 
-            
             if (!logical_logging_state) {
                 if (resume_start_tick == 0) resume_start_tick = current_time;
                 
-                // Validate switch remained physically ON for 5000ms continuously
+                // If switch remains physically ON for 5000ms continuously: Start Logging
                 if ((current_time - resume_start_tick) >= pdMS_TO_TICKS(5000)) {
                     logical_logging_state = true;
                     
-                    // 1-Minute Rule: If paused > 60 seconds, create new file
+                    // File Rotation: Generate new filename if paused > 60s
                     if (actual_pause_time > 0 && (current_time - actual_pause_time) > pdMS_TO_TICKS(60000)) {
-                        get_next_filename(active_log_filename, sizeof(active_log_filename));
+                        get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
                         ESP_LOGI(TAG, "Paused > 1 min. Starting NEW file: %s", active_log_filename);
-                    } else if (actual_pause_time > 0) {
-                        ESP_LOGI(TAG, "Paused < 1 min. Resuming EXISTING file: %s", active_log_filename);
-                    }
                     
+                    // Boot Condition: Generate first filename of session
+                    } else if (strlen(active_log_filename) == 0) {
+                        get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
+                    }
+
+                    // Open file pointer in Append Mode
                     if (sd_card != NULL) {
                         char data_path[128]; 
                         snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, active_log_filename);
-                        f = fopen(data_path, "a"); // Append mode
-                        
+                        f = fopen(data_path, "a");
                         if (f != NULL) { 
-                            setvbuf(f, NULL, _IOFBF, 4096); // Expand C buffer to 4KB block size
+                            setvbuf(f, NULL, _IOFBF, 4096); // Set 4KB block size to match FAT32 clusters
                             load_metadata(); 
                             last_sync_time = current_time; 
+                            last_meta_sync_time = current_time;
                         }
                     }
                 }
             }
         }
 
-        // --- Output Processing & Telemetry Export ---
+        // --- QUEUE CONSUMER & FILE WRITE LOGIC ---
         if (received == pdTRUE) {
             
-            // Console Output Formatting
+            // Print payload to console (throtteled logging file notification)
             if (logical_logging_state) {
-                printf("%s  [LOGGING : %s]\n", msg.payload, active_log_filename);
+                printf("%s\n", msg.payload);
             } else {
-                printf("%s  [PAUSED]\n", msg.payload);
+                printf("%s\n  [PAUSED]\n", msg.payload);
             }
             fflush(stdout);
 
-            // Export telemetry to shared memory.
-            // Mutex ensures Web Server never reads half-written data.
+            // Export to dashboard via Mutex thread lock
             xSemaphoreTake(live_data_mutex, portMAX_DELAY);
             memcpy(&live_gps_data, &msg, sizeof(gps_msg_t));
             live_is_logging = logical_logging_state;
-            strncpy(live_active_file, active_log_filename, sizeof(live_active_file)); // Share active filename
+            strncpy(live_active_file, active_log_filename, sizeof(live_active_file));
             xSemaphoreGive(live_data_mutex);
 
             if (logical_logging_state && f != NULL) {
                 fprintf(f, "%s\n", msg.payload);
                 
-                // Update metadata tracking dynamically
+                // Track metadata bounds
                 current_meta.lines++;
-                extract_metadata_record(&msg, current_meta.last_record);
+                extract_metadata_record(&msg, current_meta.last_record); 
+                
+                // Save first line (usually zeroes)
                 if (current_meta.lines == 1) {
                     extract_metadata_record(&msg, current_meta.first_record);
                 }
 
-                // Execute fsync every 30 seconds to protect flash memory
+                // If first line was zeroes, lock metadata immediately upon finding a valid fix
+                if (!current_meta.first_valid_found && msg.fix_type > 1) {
+                    extract_metadata_record(&msg, current_meta.first_record);
+                    current_meta.first_valid_found = true;
+                    save_metadata(); 
+                }
+
+                // --- 30-SECOND HARDWARE FSYNC ALGORITHM ---
                 if ((current_time - last_sync_time) > pdMS_TO_TICKS(30000)) {
                     fflush(f); 
                     fsync(fileno(f)); 
-                    save_metadata(); 
                     last_sync_time = current_time;
+                    
+                    // Throttled terminal notification so user knows data is surviving
+                    printf("  [LOGGING BUFFER SYNCED : %s]\n", active_log_filename);
+                    fflush(stdout); // Force text out of RAM and onto the terminal
+                }
+
+                // --- 30-SECOND METADATA CACHE ALGORITHM ---
+                if ((current_time - last_meta_sync_time) > pdMS_TO_TICKS(30000)) {
+                    save_metadata();
+                    last_meta_sync_time = current_time;
                 }
             }
         }
@@ -348,17 +404,13 @@ void gps_log_task(void *arg) {
 }
 
 /** 
- * @brief Debugging Task: Reads the final lines of the file directly from the SD card.
- * @details
- * Seeks to the end of the active file to prove that the FAT filesystem is 
- * successfully recording data to the physical flash memory.
+ * @brief Debug Verification Task: Validates data is written successfully to physical media.
  */
 void gps_tail_task(void *arg) {
     char last_lines[10][MAX_LINE_LEN]; 
     char temp_buf[MAX_LINE_LEN];
-    
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000)); // Run once every 60 seconds
+        vTaskDelay(pdMS_TO_TICKS(60000)); 
         if (sd_card == NULL || strlen(active_log_filename) == 0) continue;
 
         char data_path[128]; 
@@ -366,15 +418,14 @@ void gps_tail_task(void *arg) {
         FILE *f = fopen(data_path, "r");
         if (f == NULL) continue;
 
-        // Seek near end of file to avoid large memory allocations
+        // Jump near end of file to prevent crashing heap on large files
         fseek(f, 0, SEEK_END); 
         long size = ftell(f);
-        long offset = size > 1500 ? size - 1500 : 0;
+        long offset = size > 2500 ? size - 2500 : 0;
         fseek(f, offset, SEEK_SET);
 
-        if (offset > 0) fgets(temp_buf, sizeof(temp_buf), f); // Discard partial fragmented line
+        if (offset > 0) fgets(temp_buf, sizeof(temp_buf), f);
         
-        // Read remaining lines into a circular buffer
         int idx = 0, count = 0;
         while (fgets(temp_buf, sizeof(temp_buf), f) != NULL) {
             strncpy(last_lines[idx], temp_buf, MAX_LINE_LEN - 1);
@@ -384,12 +435,11 @@ void gps_tail_task(void *arg) {
         }
         fclose(f);
 
+        // Print final buffer to console
         printf("\n--- VERIFICATION: LAST %d LINES OF %s ---\n", count > 10 ? 10 : count, active_log_filename);
         int start_idx = count > 10 ? idx : 0;
         int lines_to_print = count > 10 ? 10 : count;
-        
         for (int i = 0; i < lines_to_print; i++) {
-            // fgets preserves the newline character, so no '\n' is needed in printf
             printf("%s", last_lines[(start_idx + i) % 10]);
         }
         printf("--------------------------------------------------\n\n");

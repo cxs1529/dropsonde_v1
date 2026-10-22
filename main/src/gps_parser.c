@@ -1,14 +1,16 @@
 /**
  * ==============================================================================
  * @file    gps_parser.c
- * @brief   GPS UART communication, NMEA parsing, and RTC clock sync.
+ * @brief   GPS UART communication, NMEA sentence parsing, and RTC clock sync.
  * 
  * @details
- * This file acts as the primary PRODUCER in our FreeRTOS architecture.
- * It continuously polls the UART hardware buffer to retrieve bytes sent by the GPS.
- * Because a complete GPS dataset requires multiple NMEA sentences (GGA for quality, 
- * GSA for PDOP, RMC for location), this module caches fragments in a local state 
- * structure until the RMC sentence arrives, which triggers the final payload generation.
+ * Operates as the PRODUCER task in the FreeRTOS architecture.
+ * - Reads incoming bytes from UART1 and buffers them into complete NMEA lines.
+ * - Validates checksums using minmea and parses GGA, GSA, and RMC sentences.
+ * - Starts at 01/01/70 00:00:00 if no GPS time is available, incrementing by 1s.
+ * - Synchronizes the internal RTC immediately when valid GPS time is received, 
+ *   even if a geographical fix hasn't been acquired yet (via module RTC).
+ * - Generates two-line telemetry entries formatted for NOAA requirements.
  * ==============================================================================
  */
 
@@ -19,183 +21,212 @@
 #include "driver/gpio.h"
 #include <stdio.h>
 #include <string.h>
-#include <sys/time.h> // For settimeofday() - sets internal clock
-#include <time.h>     // For time(), gmtime_r() - reads internal clock
-#include <math.h>     // For isnan() - validates floating point parsing
+#include <sys/time.h> 
+#include <time.h>     
+#include <math.h>     
 
 #define BUF_SIZE (1024)
 
 /** 
- * @brief Internal cache to hold GPS data between different NMEA sentences.
+ * @brief Internal cache to preserve state across fragmented NMEA sentences.
+ * The GPS outputs data across multiple sentences per second. We must cache 
+ * precision and fix data until the RMC sentence arrives to compile a full record.
  */
 typedef struct {
     float pdop;         ///< Position Dilution of Precision (multiplicative error factor)
-    int fix_type;       ///< 1 = No Fix, 2 = 2D Fix (Flat), 3 = 3D Fix (Includes Altitude)
+    int fix_type;       ///< 0 = No Fix, 2 = 2D Fix, 3 = 3D Fix
     int fix_quality;    ///< 0 = Invalid, 1 = GPS Fix, 2 = DGPS Fix
 } gps_state_t;
 
-// Initialize state assuming no satellite lock at boot
-static gps_state_t current_gps = { .pdop = 0.0, .fix_type = 1, .fix_quality = 0 };
+static gps_state_t current_gps = { .pdop = 0.0, .fix_type = 0, .fix_quality = 0 };
+
+/**
+ * @brief Converts raw NMEA DDMM.MMMM format into separated Degrees and Minutes.
+ */
+static void convert_coordinate(float raw_coord, char pos_char, char neg_char, int *degrees, float *minutes, char *direction) {
+    *direction = raw_coord >= 0 ? pos_char : neg_char;
+    float abs_coord = raw_coord < 0 ? -raw_coord : raw_coord;
+    *degrees = (int)(abs_coord / 100);
+    *minutes = abs_coord - (*degrees * 100);
+}
 
 /** 
  * @brief Parses GGA (Global Positioning System Fix Data) sentence.
- * GGA provides info about satellite lock quality (Standard vs DGPS).
+ * Extracts the lock quality indicator (Standard vs DGPS).
  */
 static void handle_gga_sentence(const char *line) {
     struct minmea_sentence_gga frame;
-    // Attempt to parse line into GGA structure
     if (minmea_parse_gga(&frame, line)) {
-        current_gps.fix_quality = frame.fix_quality; // Save quality: 0=invalid, 1=GPS fix, 2=DGPS fix
+        current_gps.fix_quality = frame.fix_quality;
     }
 }
 
 /** 
  * @brief Parses GSA (GPS DOP and Active Satellites) sentence.
- * GSA provides 2D/3D status and structural geometric error (PDOP).
+ * Extracts 2D/3D status and structural geometric error (PDOP).
  */
 static void handle_gsa_sentence(const char *line) {
     struct minmea_sentence_gsa frame;
     if (minmea_parse_gsa(&frame, line)) {
-        // minmea uses scaled integers for memory safety. Convert to float only if scale exists.
         if (frame.pdop.scale != 0) {
             current_gps.pdop = minmea_tofloat(&frame.pdop);
         }
-        current_gps.fix_type = frame.fix_type; // Save fix dimension: 1=none, 2=2D, 3=3D
+        current_gps.fix_type = frame.fix_type;
     }
 }
 
 /** 
- * @brief Fallback generator triggered when GPS signal is lost or disconnected.
- * Uses the ESP32's internal RTC time (previously synchronized) to output a 1Hz log payload.
+ * @brief Fallback generator triggered when UART is disconnected or completely silent.
+ * Generates an uptime-based 1970 timestamp using the RTOS tick count.
  */
 static void generate_rtc_dummy_message(void) {
-    time_t now; 
-    time(&now); // Read current UNIX timestamp from ESP32 system clock
-    struct tm timeinfo; 
-    gmtime_r(&now, &timeinfo); // Convert raw timestamp into readable UTC date/time fields
+    // Calculate seconds since the ESP32 booted
+    time_t boot_sec = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
+    struct tm fake_tm; 
+    gmtime_r(&boot_sec, &fake_tm);
     
     gps_msg_t msg = {0};
-    msg.fix_type = 1;     // Force "No fix" status
-    msg.pdop = 0.0;       // Reset error factor
-    msg.lat = 0.0;        // Set dummy coordinates
+    msg.fix_type = 0; 
+    msg.pdop = 0.0;
+    msg.lat = 0.0;
     msg.lon = 0.0;
-    strcpy(msg.fix_desc, "No fix");
+    strcpy(msg.fix_desc, "no fix");
     
-    // Check if system clock has been synced at least once since boot (Year 1970 check)
-    if (timeinfo.tm_year > 100) { // tm_year counts years since 1900. (2026 - 1900 = 126)
-        msg.year = timeinfo.tm_year - 100; // Convert to 2-digit format (126 -> 26)
-        msg.month = timeinfo.tm_mon + 1;   // Convert POSIX 0-11 range to 1-12 range
-        msg.day = timeinfo.tm_mday;
-        msg.hour = timeinfo.tm_hour;
-        msg.min = timeinfo.tm_min;
-        msg.sec = timeinfo.tm_sec;
-    }
+    // Force date to 1970 (POSIX epoch) and overlay uptime hours/mins/secs
+    msg.year = 70;
+    msg.month = 1;
+    msg.day = fake_tm.tm_mday;
+    msg.hour = fake_tm.tm_hour;
+    msg.min = fake_tm.tm_min;
+    msg.sec = fake_tm.tm_sec;
     
-    // Format payload with 0.000000 coordinates
+    // Initialize sensor placeholders to 0
+    msg.pressure = 0.0;
+    msg.temperature = 0.0;
+    msg.conductivity = 0.0;
+
     snprintf(msg.payload, sizeof(msg.payload), 
-        "%02d/%02d/%02d  %02d:%02d:%02d  %.6f  %.6f  PDOP: %.1f FIX TYPE: %d (%s)",
+        "%02d/%02d/%02d  %02d:%02d:%02d  00 00.000000N  000 00.000000E  PDOP: 00.0 FIX TYPE: 0 (no fix)\n"
+        "P= %05.0f  T= %05.0f  C= %05.0f",
         msg.month, msg.day, msg.year, msg.hour, msg.min, msg.sec,
-        msg.lat, msg.lon, msg.pdop, msg.fix_type, msg.fix_desc
+        msg.pressure, msg.temperature, msg.conductivity
     );
     
-    // Dispatch to consumer queue. Timeout = 0 ensures parser never blocks if queue is full.
-    xQueueSend(gps_queue, &msg, 0); 
+    // Dispatch to SD logger
+    xQueueSend(gps_queue, &msg, 0);
 }
 
 /** 
- * @brief Parses RMC (Recommended Minimum Navigation Information) sentence.
- * This is the primary driver. It extracts date/time/coordinates, resyncs system RTC,
- * converts coordinates to Decimal Degrees (dd.ddd), and compiles the final payload.
+ * @brief Parses RMC sentences, syncs the internal RTC, and dispatches the final payload.
  */
 static bool handle_rmc_sentence(const char *line) {
     struct minmea_sentence_rmc frame;
-    // Return false if the line is not a valid RMC sentence
     if (!minmea_parse_rmc(&frame, line)) return false; 
     
     gps_msg_t msg = {0};
 
-    // frame.valid is a boolean flag sent directly by the GPS hardware ('A'=valid, 'V'=invalid)
-    if (frame.valid) {
-        // --- SATELLITE FIX PRESENT: Sync Internal RTC ---
+    // --- OS RTC SYNC ---
+    // Even if satellites haven't triangulated a position yet, the GPS module's 
+    // internal battery-backed RTC usually transmits the correct UTC date and time.
+    // We immediately lock the ESP32's system clock to this time so the SD file manager 
+    // can generate the correct chronological filename.
+    if (frame.date.year > 0) {
         struct tm t = {0};
-        t.tm_year = frame.date.year + 100; // Convert 2-digit year (26) to POSIX year (126)
-        t.tm_mon  = frame.date.month - 1;  // Convert 1-12 range to POSIX 0-11 range
+        t.tm_year = frame.date.year + 100; // Convert 2-digit year to POSIX year
+        t.tm_mon  = frame.date.month - 1;  // Convert 1-12 range to 0-11 range
         t.tm_mday = frame.date.day;
         t.tm_hour = frame.time.hours;
         t.tm_min  = frame.time.minutes;
         t.tm_sec  = frame.time.seconds;
         
-        // Convert broken-down struct tm into seconds since epoch
-        time_t timestamp = mktime(&t);
-        struct timeval tv = { .tv_sec = timestamp, .tv_usec = 0 };
-        // Instantly write satellite-accurate time to the ESP32 internal hardware clock
+        struct timeval tv = { .tv_sec = mktime(&t), .tv_usec = 0 };
         settimeofday(&tv, NULL);
-        
-        msg.year = frame.date.year; 
-        msg.month = frame.date.month; 
-        msg.day = frame.date.day;
-        msg.hour = frame.time.hours; 
-        msg.min = frame.time.minutes; 
-        msg.sec = frame.time.seconds;
-        
-        // Native minmea function converts DDMM.MMMM format directly to Decimal Degrees (dd.ddd)
-        msg.lat = minmea_tocoord(&frame.latitude);
-        msg.lon = minmea_tocoord(&frame.longitude);
-        
-        // Safety checks to prevent math failures if coordinates are corrupt
-        if (isnan(msg.lat)) msg.lat = 0.0;
-        if (isnan(msg.lon)) msg.lon = 0.0;
-        
-    } else {
-        // --- NO LOCK (Searching): Fallback to internal system RTC ---
-        time_t now; time(&now);
-        struct tm timeinfo; gmtime_r(&now, &timeinfo);
-        if (timeinfo.tm_year > 100) { 
-            msg.year = timeinfo.tm_year - 100; 
-            msg.month = timeinfo.tm_mon + 1; 
-            msg.day = timeinfo.tm_mday;
-            msg.hour = timeinfo.tm_hour; 
-            msg.min = timeinfo.tm_min; 
-            msg.sec = timeinfo.tm_sec;
-        }
-        msg.lat = 0.0; 
-        msg.lon = 0.0;
-        current_gps.fix_type = 1; // Mark fix as invalid
     }
 
-    msg.pdop = current_gps.pdop;
-    msg.fix_type = current_gps.fix_type;
-    strcpy(msg.fix_desc, current_gps.fix_type == 3 ? "3D fix" : (current_gps.fix_type == 2 ? "2D fix" : "No fix"));
-    
-    // Assemble human-readable string representation for terminal & SD card file
+    int lat_deg = 0, lon_deg = 0;
+    float lat_min = 0.0, lon_min = 0.0;
+    char lat_dir = 'N', lon_dir = 'E';
+
+    if (frame.valid) {
+        // --- SATELLITE FIX ACQUIRED ---
+        // Populate the telemetry message with the actual geographical data.
+        msg.year = frame.date.year;
+        msg.month = frame.date.month;
+        msg.day = frame.date.day;
+        msg.hour = frame.time.hours;
+        msg.min = frame.time.minutes;
+        msg.sec = frame.time.seconds;
+
+        // Convert coordinates for the Web Dashboard JSON
+        msg.lat = minmea_tocoord(&frame.latitude);
+        msg.lon = minmea_tocoord(&frame.longitude);
+        if (isnan(msg.lat)) msg.lat = 0.0;
+        if (isnan(msg.lon)) msg.lon = 0.0;
+
+        // Convert coordinates for the physical SD card log string
+        convert_coordinate(minmea_tofloat(&frame.latitude), 'N', 'S', &lat_deg, &lat_min, &lat_dir);
+        convert_coordinate(minmea_tofloat(&frame.longitude), 'E', 'W', &lon_deg, &lon_min, &lon_dir);
+        
+        msg.pdop = current_gps.pdop;
+        msg.fix_type = current_gps.fix_type;
+        strcpy(msg.fix_desc, current_gps.fix_type == 3 ? "3D fix" : (current_gps.fix_type == 2 ? "2D fix" : "no fix"));
+    } else {
+        // --- NO SATELLITE FIX (SEARCHING) ---
+        // NOAA requirements: If no fix is available, fall back to 1970 uptime logic
+        // for the log file output (even if the RTC is synced internally).
+        time_t boot_sec = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
+        struct tm fake_tm; 
+        gmtime_r(&boot_sec, &fake_tm);
+
+        msg.year = 70;
+        msg.month = 1;
+        msg.day = fake_tm.tm_mday;
+        msg.hour = fake_tm.tm_hour;
+        msg.min = fake_tm.tm_min;
+        msg.sec = fake_tm.tm_sec;
+
+        msg.lat = 0.0; 
+        msg.lon = 0.0;
+        msg.pdop = 0.0;
+        msg.fix_type = 0;
+        strcpy(msg.fix_desc, "no fix");
+
+        // Initialize sensor placeholders to 0 (to be replaced by I2C/SPI sensor reads later)
+        msg.pressure = 0.0;
+        msg.temperature = 0.0;
+        msg.conductivity = 0.0;
+    }
+
+    // Assemble the two-line output string
     snprintf(msg.payload, sizeof(msg.payload), 
-        "%02d/%02d/%02d  %02d:%02d:%02d  %.6f  %.6f  PDOP: %.1f FIX TYPE: %d (%s)",
-        msg.month, msg.day, msg.year, msg.hour, msg.min, msg.sec,
-        msg.lat, msg.lon, msg.pdop, msg.fix_type, msg.fix_desc
+            "%02d/%02d/%02d  %02d:%02d:%02d  %02d %09.6f%c  %03d %09.6f%c  PDOP: %04.1f FIX TYPE: %d (%s)\n"
+            "P= %05.0f  T= %05.0f  C= %05.0f",
+            msg.month, msg.day, msg.year, msg.hour, msg.min, msg.sec,
+            lat_deg, lat_min, lat_dir, lon_deg, lon_min, lon_dir,
+            msg.pdop, msg.fix_type, msg.fix_desc,
+            msg.pressure, msg.temperature, msg.conductivity
     );
     
-    // Send discrete telemetry package to consumer task via queue
+    // Dispatch to the queue for the SD logger to consume
     xQueueSend(gps_queue, &msg, 0); 
-    return true; // Return true to indicate a valid 1Hz cycle completed
+    return true; 
 }
 
 /** 
- * @brief Dispatcher that validates checksums and routes the NMEA string to sub-parsers.
+ * @brief Validates NMEA checksums and routes sentences to sub-parsers.
  */
 static bool process_nmea_line(const char *line) {
-    // minmea_check performs strict checksum (*6A) validation to drop electrically corrupted lines
     if (!minmea_check(line, false)) return false; 
-    
     switch (minmea_sentence_id(line, false)) {
         case MINMEA_SENTENCE_GGA: handle_gga_sentence(line); return false;
         case MINMEA_SENTENCE_GSA: handle_gsa_sentence(line); return false;
         case MINMEA_SENTENCE_RMC: return handle_rmc_sentence(line);
-        default: return false; // Ignore irrelevant sentences (GSV, VTG, GLL)
+        default: return false; 
     }
 }
 
 /** 
- * @brief Configures and installs the ESP-IDF hardware UART driver.
+ * @brief Configures ESP-IDF hardware UART driver for standard 9600 baud NMEA.
  */
 static void init_gps_uart(void) {
     uart_config_t uart_config = {
@@ -206,49 +237,42 @@ static void init_gps_uart(void) {
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, 
         .source_clk = UART_SCLK_DEFAULT,
     };
-    
-    // Allocate 2KB of internal ESP32 RAM for the background RX FIFO ring buffer
     uart_driver_install(UART_NUM_1, BUF_SIZE * 2, 0, 0, NULL, 0);
     uart_param_config(UART_NUM_1, &uart_config);
-    // Route UART1 to physical GPIO pins 6 and 7
     uart_set_pin(UART_NUM_1, UART1_TXD_PIN, UART1_RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 }
 
 /** 
- * @brief Main FreeRTOS task loop for receiving and parsing GPS data.
- * This runs indefinitely, yielding CPU to other tasks while waiting for new bytes.
+ * @brief RTOS Task: Constantly polls UART FIFO buffer, parsing data as it arrives.
  */
 void gps_rx_task(void *arg) {
     init_gps_uart();
     uint8_t *data = (uint8_t *) malloc(BUF_SIZE);
     char line_buffer[MAX_LINE_LEN]; 
     int line_len = 0;
-    
     TickType_t last_msg_tick = xTaskGetTickCount();
     
     while (1) {
-        // Read available bytes from hardware FIFO. Blocks (yields CPU) for up to 100ms.
+        // Read available bytes (blocking up to 100ms)
         int length = uart_read_bytes(UART_NUM_1, data, BUF_SIZE - 1, 100 / portTICK_PERIOD_MS);
         
         for (int i = 0; i < length; i++) {
             char c = (char)data[i];
-            
-            // If newline encountered, sentence is complete
+            // Split incoming stream by carriage return / newline
             if (c == '\n' || c == '\r') {
                 if (line_len > 0) {
-                    line_buffer[line_len] = '\0'; // Cap string safely 
+                    line_buffer[line_len] = '\0'; 
                     if (process_nmea_line(line_buffer)) {
-                        last_msg_tick = xTaskGetTickCount(); // Reset 1Hz timer on valid RMC
+                        last_msg_tick = xTaskGetTickCount(); // Reset fallback timer on success
                     }
-                    line_len = 0; // Reset length counter for next sentence                 
+                    line_len = 0;                  
                 }
             } else {
-                // Prevent array overflow if sentence exceeds maximum expected length
                 if (line_len < MAX_LINE_LEN - 1) line_buffer[line_len++] = c;
             }
         }
-
-        // Guaranteed 1Hz Fallback: If 1000ms passes with no RMC sentence, force an RTC log
+        
+        // Software Fallback: Force a dummy 1Hz update if hardware UART goes completely dead
         if ((xTaskGetTickCount() - last_msg_tick) >= pdMS_TO_TICKS(1000)) {
             generate_rtc_dummy_message();
             last_msg_tick = xTaskGetTickCount();
