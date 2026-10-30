@@ -58,7 +58,8 @@ static void extract_metadata_record(gps_msg_t *msg, char* dest) {
 static void save_metadata(void) {
     if (strlen(active_log_filename) == 0) return;
     char meta_path[128];
-    snprintf(meta_path, sizeof(meta_path), "%s/%s.META", META_DIR, active_log_filename);
+    int base_len = strlen(active_log_filename) - 4; // Strip the ".txt"
+    snprintf(meta_path, sizeof(meta_path), "%s/%.*s_meta.txt", META_DIR, base_len, active_log_filename);
     FILE *fm = fopen(meta_path, "w");
     if (fm) {
         fprintf(fm, "%ld\n%s\n%s\n", current_meta.lines, current_meta.first_record, current_meta.last_record);
@@ -77,7 +78,8 @@ static void load_metadata(void) {
     
     if (strlen(active_log_filename) == 0) return;
     char meta_path[128];
-    snprintf(meta_path, sizeof(meta_path), "%s/%s.META", META_DIR, active_log_filename);
+    int base_len = strlen(active_log_filename) - 4; // Strip the ".txt"
+    snprintf(meta_path, sizeof(meta_path), "%s/%.*s_meta.txt", META_DIR, base_len, active_log_filename);
     FILE *fm = fopen(meta_path, "r");
     if (fm) {
         char buf[64];
@@ -85,7 +87,6 @@ static void load_metadata(void) {
         if (fgets(buf, sizeof(buf), fm)) { 
             buf[strcspn(buf, "\r\n")] = '\0'; 
             strncpy(current_meta.first_record, buf, 63); 
-            // Lock metadata boolean if the previous execution recorded a real coordinate
             if (strstr(current_meta.first_record, "Lat: 0.00000") == NULL && strlen(current_meta.first_record) > 10) {
                 current_meta.first_valid_found = true;
             }
@@ -114,20 +115,19 @@ static void get_timestamp_filename(char *filename_out, size_t max_len) {
              year, timeinfo.tm_mon + 1, timeinfo.tm_mday,
              timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
     
-    char candidate[128]; // Increased buffer size to satisfy GCC truncation checks
-    snprintf(candidate, sizeof(candidate), "%s.dat", base_name);
+    char candidate[128]; 
+    snprintf(candidate, sizeof(candidate), "%s.txt", base_name);
     
     char full_path[256];
     snprintf(full_path, sizeof(full_path), "%s/%s", DATA_DIR, candidate);
     
     struct stat st;
     if (stat(full_path, &st) != 0) {
-        strncpy(filename_out, candidate, max_len); // Path does not exist, safe to use
+        strncpy(filename_out, candidate, max_len); 
     } else {
-        // File collision detected. Iterate suffix until an open slot is found.
         int suffix = 1;
         while (1) {
-            snprintf(candidate, sizeof(candidate), "%s_%d.dat", base_name, suffix);
+            snprintf(candidate, sizeof(candidate), "%s_%d.txt", base_name, suffix);
             snprintf(full_path, sizeof(full_path), "%s/%s", DATA_DIR, candidate);
             if (stat(full_path, &st) != 0) break;
             suffix++;
@@ -174,7 +174,7 @@ esp_err_t init_sd_card(void) {
 }
 
 /**
- * @brief Deletes `.META` cache files if the user manually deleted the raw `.dat` file via PC.
+ * @brief Deletes `.META` cache files if the user manually deleted the raw `.txt` file via PC.
  */
 void cleanup_orphaned_metadata(void) {
     DIR *dir = opendir(META_DIR);
@@ -182,18 +182,17 @@ void cleanup_orphaned_metadata(void) {
     
     struct dirent *ent;
     while ((ent = readdir(dir)) != NULL) {
-        char *ext_ptr = strstr(ent->d_name, ".META");
+        char *ext_ptr = strstr(ent->d_name, "_meta.txt");
         if (ext_ptr != NULL) {
-            char base_name[64];
+            char data_filename[64];
             size_t base_len = ext_ptr - ent->d_name;
-            strncpy(base_name, ent->d_name, base_len); 
-            base_name[base_len] = '\0';
+            // Reconstruct the raw data filename from the metadata filename
+            snprintf(data_filename, sizeof(data_filename), "%.*s.txt", (int)base_len, ent->d_name);
             
             char data_path[300]; 
-            snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, base_name);
+            snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, data_filename);
             struct stat st;
             
-            // If stat fails, the raw file is missing. Delete the orphan metadata.
             if (stat(data_path, &st) != 0) {
                 char meta_path[300]; 
                 snprintf(meta_path, sizeof(meta_path), "%s/%s", META_DIR, ent->d_name);
@@ -241,7 +240,6 @@ void gps_log_task(void *arg) {
                 save_metadata();
             }
             get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
-            ESP_LOGI(TAG, "New Deployment Triggered! Active File: %s", active_log_filename);
             
             if (logical_logging_state && sd_card != NULL) {
                 char data_path[128];
@@ -250,12 +248,8 @@ void gps_log_task(void *arg) {
                 if (f != NULL) {
                     setvbuf(f, NULL, _IOFBF, 4096); // Re-establish 4KB buffer on new file
                     load_metadata();
-                    last_sync_time = current_time; 
-                    last_meta_sync_time = current_time;
-                            
-                    // Print immediate feedback so you don't wait 30s blind
-                    printf("\n  [LOGGING INITIATED : %s]\n\n", active_log_filename);
-                    fflush(stdout);                    
+                    printf("\n  [NEW DEPLOYMENT FILE INITIATED : %s]\n\n", active_log_filename);
+                    fflush(stdout); 
                 }
             }
         }
@@ -287,7 +281,6 @@ void gps_log_task(void *arg) {
                         fclose(f); 
                         f = NULL;
                         save_metadata(); 
-                        ESP_LOGI(TAG, "Logging stopped and secured.");
                     }
                 }
             } else {
@@ -322,7 +315,6 @@ void gps_log_task(void *arg) {
                     // File Rotation: Generate new filename if paused > 60s
                     if (actual_pause_time > 0 && (current_time - actual_pause_time) > pdMS_TO_TICKS(60000)) {
                         get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
-                        ESP_LOGI(TAG, "Paused > 1 min. Starting NEW file: %s", active_log_filename);
                     
                     // Boot Condition: Generate first filename of session
                     } else if (strlen(active_log_filename) == 0) {
@@ -339,6 +331,9 @@ void gps_log_task(void *arg) {
                             load_metadata(); 
                             last_sync_time = current_time; 
                             last_meta_sync_time = current_time;
+                            
+                            printf("\n  [LOGGING INITIATED : %s]\n\n", active_log_filename);
+                            fflush(stdout); 
                         }
                     }
                 }
@@ -348,11 +343,11 @@ void gps_log_task(void *arg) {
         // --- QUEUE CONSUMER & FILE WRITE LOGIC ---
         if (received == pdTRUE) {
             
-            // Print payload to console (throtteled logging file notification)
+            // Print payload to console, appending the inline state tag at the end of the second line
             if (logical_logging_state) {
-                printf("%s\n", msg.payload);
+                printf("%s  [LOGGING]\n", msg.payload);
             } else {
-                printf("%s\n  [PAUSED]\n", msg.payload);
+                printf("%s  [PAUSED]\n", msg.payload);
             }
             fflush(stdout);
 
@@ -364,6 +359,7 @@ void gps_log_task(void *arg) {
             xSemaphoreGive(live_data_mutex);
 
             if (logical_logging_state && f != NULL) {
+                // Write pure payload strictly to the SD card (no UI tags)
                 fprintf(f, "%s\n", msg.payload);
                 
                 // Track metadata bounds
@@ -388,9 +384,11 @@ void gps_log_task(void *arg) {
                     fsync(fileno(f)); 
                     last_sync_time = current_time;
                     
-                    // Throttled terminal notification so user knows data is surviving
-                    printf("  [LOGGING BUFFER SYNCED : %s]\n", active_log_filename);
-                    fflush(stdout); // Force text out of RAM and onto the terminal
+                    // Throttled terminal banner so user knows data is surviving
+                    printf("\n====================================================\n");
+                    printf("[LOGGING BUFFER SYNCED : %s]\n", active_log_filename);
+                    printf("====================================================\n\n");
+                    fflush(stdout); 
                 }
 
                 // --- 30-SECOND METADATA CACHE ALGORITHM ---

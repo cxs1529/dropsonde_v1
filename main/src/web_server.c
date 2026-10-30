@@ -12,13 +12,16 @@
  * ==============================================================================
  */
 
+
 #include "web_server.h"
 #include "dns_server.h"
 #include "config.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_http_server.h"
+#include "esp_vfs_fat.h"
 #include "driver/gpio.h"
+#include <sys/statvfs.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/unistd.h>
@@ -30,6 +33,9 @@ static httpd_handle_t web_server_handle = NULL;
 
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
+
+extern const uint8_t favicon_ico_start[] asm("_binary_favicon_ico_start");
+extern const uint8_t favicon_ico_end[]   asm("_binary_favicon_ico_end");
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
@@ -69,13 +75,21 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
     char chunk[512];
     
     while ((ent = readdir(dir)) != NULL) {
+        // STRICT FILTER: Ignore metadata files and ensure the file ends exactly with ".txt"
+        if (strstr(ent->d_name, "_meta.txt") != NULL) continue;
+        
+        char *ext = strstr(ent->d_name, ".txt");
+        if (ext == NULL || strcmp(ext, ".txt") != 0) continue;
+
         struct stat st; 
         char path[300]; 
         snprintf(path, sizeof(path), "%s/%s", DATA_DIR, ent->d_name);
         stat(path, &st);
         
-        char meta_path[300]; 
-        snprintf(meta_path, sizeof(meta_path), "%s/%s.META", META_DIR, ent->d_name);
+        char meta_path[300];
+        int base_len = strlen(ent->d_name) - 4; // Strip the ".txt"
+        snprintf(meta_path, sizeof(meta_path), "%s/%.*s_meta.txt", META_DIR, base_len, ent->d_name);
+        
         long lines = 0; 
         char first_line[64] = "N/A", last_line[64] = "N/A";
         
@@ -89,34 +103,59 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
         }
         
         snprintf(chunk, sizeof(chunk), "%s{\"name\":\"%s\",\"size\":%ld,\"lines\":%ld,\"first\":\"%s\",\"last\":\"%s\"}", 
-                 first_item ? "" : ",", ent->d_name, st.st_size, lines, first_line, last_line);
+                 first_item ? "" : ",", ent->d_name, (long)st.st_size, lines, first_line, last_line);
         httpd_resp_send_chunk(req, chunk, strlen(chunk));
         first_item = false;
     }
+    
     closedir(dir);
     httpd_resp_send_chunk(req, "]", 1);
     httpd_resp_send_chunk(req, NULL, 0); 
     return ESP_OK;
 }
 
+/** 
+ * @brief Streams file downloads over HTTP in 1KB chunks.
+ * Sets Content-Disposition header so the browser knows the real filename.
+ */
 static esp_err_t download_get_handler(httpd_req_t *req) {
-    char filepath[256]; char filename[128];
+    char filepath[256]; 
+    char filename[128];
+    
+    // 1. Extract the filename from the query string
     if (httpd_req_get_url_query_str(req, filename, sizeof(filename)) != ESP_OK ||
         httpd_query_key_value(filename, "file", filename, sizeof(filename)) != ESP_OK) {
-        httpd_resp_send_404(req); return ESP_FAIL;
+        httpd_resp_send_404(req); 
+        return ESP_FAIL;
     }
+
     snprintf(filepath, sizeof(filepath), "%s/%s", DATA_DIR, filename);
     FILE *fd = fopen(filepath, "r");
-    if (!fd) { httpd_resp_send_404(req); return ESP_FAIL; }
+    if (!fd) { 
+        httpd_resp_send_404(req); 
+        return ESP_FAIL; 
+    }
 
+    // 2. Set the MIME type
     httpd_resp_set_type(req, "application/octet-stream");
-    char chunk[1024]; size_t chunksize;
+
+    // 3. Instruct the browser to save it with its actual filename
+    char header_val[160];
+    snprintf(header_val, sizeof(header_val), "attachment; filename=\"%s\"", filename);
+    httpd_resp_set_hdr(req, "Content-Disposition", header_val);
+
+    // 4. Stream file chunks
+    char chunk[1024]; 
+    size_t chunksize;
     do {
         chunksize = fread(chunk, 1, sizeof(chunk), fd);
-        if (chunksize > 0) httpd_resp_send_chunk(req, chunk, chunksize);
+        if (chunksize > 0) {
+            httpd_resp_send_chunk(req, chunk, chunksize);
+        }
     } while (chunksize != 0);
+
     fclose(fd);
-    httpd_resp_send_chunk(req, NULL, 0); 
+    httpd_resp_send_chunk(req, NULL, 0); // Terminate response
     return ESP_OK;
 }
 
@@ -180,6 +219,21 @@ static esp_err_t manage_post_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+
+/**
+ * @brief Captive Portal Redirect
+ * Catches background OS internet checks (e.g., /connecttest.txt, /generate_204)
+ * and forces a 302 redirect to the main dashboard.
+ */
+static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t err) {
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_set_hdr(req, "Connection", "close"); // FIX: Free the socket immediately
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+
 void init_wifi_base(void) {
     esp_netif_init();
     esp_event_loop_create_default();
@@ -202,17 +256,103 @@ void init_wifi_base(void) {
     esp_wifi_set_config(WIFI_IF_AP, &wifi_config);
 }
 
+
+/** 
+ * @brief Serves mapping library assets (Leaflet, GeoJSON, HTML) from the /.MAP folder.
+ */
+static esp_err_t map_asset_get_handler(httpd_req_t *req) {
+    char filepath[256]; char filename[128];
+    if (httpd_req_get_url_query_str(req, filename, sizeof(filename)) != ESP_OK ||
+        httpd_query_key_value(filename, "file", filename, sizeof(filename)) != ESP_OK) {
+        httpd_resp_send_404(req); return ESP_FAIL;
+    }
+
+    // Route request to the .MAP directory
+    snprintf(filepath, sizeof(filepath), "%s/.MAP/%s", MOUNT_POINT, filename);
+    FILE *fd = fopen(filepath, "r");
+    if (!fd) { httpd_resp_send_404(req); return ESP_FAIL; }
+
+    // Set basic MIME types
+    if (strstr(filename, ".css")) httpd_resp_set_type(req, "text/css");
+    else if (strstr(filename, ".js")) httpd_resp_set_type(req, "application/javascript");
+    else if (strstr(filename, ".geojson") || strstr(filename, ".json")) httpd_resp_set_type(req, "application/json");
+    else if (strstr(filename, ".html")) httpd_resp_set_type(req, "text/html");
+    else httpd_resp_set_type(req, "text/plain");
+
+    char chunk[1024]; size_t chunksize;
+    do {
+        chunksize = fread(chunk, 1, sizeof(chunk), fd);
+        if (chunksize > 0) httpd_resp_send_chunk(req, chunk, chunksize);
+    } while (chunksize != 0);
+    fclose(fd);
+    
+    httpd_resp_send_chunk(req, NULL, 0); 
+    return ESP_OK;
+}
+
+
+/**
+ * @brief Serves the embedded favicon directly from flash memory.
+ */
+static esp_err_t favicon_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "image/x-icon");
+    const size_t favicon_size = (favicon_ico_end - favicon_ico_start);
+    return httpd_resp_send(req, (const char *)favicon_ico_start, favicon_size);
+}
+
+
+/**
+ * @brief Retrieves SD card storage metrics safely, always returning JSON.
+ */
+static esp_err_t storage_api_get_handler(httpd_req_t *req) {
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+    
+    // Explicitly use your exact mount point string here (no trailing slashes)
+    const char* base_path = "/sdcard"; 
+    
+    esp_err_t err = esp_vfs_fat_info(base_path, &total_bytes, &free_bytes);
+    
+    if (err != ESP_OK) {
+        ESP_LOGE("WEB_SERVER", "Failed to read FAT info from %s. Error: %s", base_path, esp_err_to_name(err));
+        // Fallback to zeroes so the UI parser doesn't crash
+        total_bytes = 0;
+        free_bytes = 0;
+    }
+
+    uint64_t used_bytes = total_bytes > free_bytes ? (total_bytes - free_bytes) : 0;
+    char json_response[128];
+    
+    snprintf(json_response, sizeof(json_response), 
+             "{\"total\":%llu,\"used\":%llu,\"free\":%llu}", 
+             (unsigned long long)total_bytes, 
+             (unsigned long long)used_bytes, 
+             (unsigned long long)free_bytes);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_response, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+
 static void start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.max_req_hdr_len = 2048;
+    config.lru_purge_enable = true;
+
     if (httpd_start(&web_server_handle, &config) == ESP_OK) {
+
+        httpd_register_err_handler(web_server_handle, HTTPD_404_NOT_FOUND, captive_portal_404_handler);
         httpd_uri_t index_uri = { .uri = "/", .method = HTTP_GET, .handler = index_get_handler };
         httpd_uri_t live_uri  = { .uri = "/api/live", .method = HTTP_GET, .handler = live_api_get_handler };
         httpd_uri_t list_uri  = { .uri = "/api/list", .method = HTTP_GET, .handler = list_get_handler };
         httpd_uri_t dl_uri    = { .uri = "/download*", .method = HTTP_GET, .handler = download_get_handler };
         httpd_uri_t view_uri  = { .uri = "/view*", .method = HTTP_GET, .handler = view_get_handler };
         httpd_uri_t mng_uri   = { .uri = "/api/manage*", .method = HTTP_POST, .handler = manage_post_handler };
+        httpd_uri_t map_asset_uri = { .uri = "/map_asset*", .method = HTTP_GET, .handler = map_asset_get_handler };
+        httpd_uri_t favicon_uri = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get_handler };
+        httpd_uri_t storage_uri = { .uri = "/api/storage", .method = HTTP_GET, .handler = storage_api_get_handler };
         
         httpd_register_uri_handler(web_server_handle, &index_uri);
         httpd_register_uri_handler(web_server_handle, &live_uri);
@@ -220,6 +360,9 @@ static void start_webserver(void) {
         httpd_register_uri_handler(web_server_handle, &dl_uri);
         httpd_register_uri_handler(web_server_handle, &view_uri);
         httpd_register_uri_handler(web_server_handle, &mng_uri);
+        httpd_register_uri_handler(web_server_handle, &map_asset_uri);
+        httpd_register_uri_handler(web_server_handle, &favicon_uri);
+        httpd_register_uri_handler(web_server_handle, &storage_uri);
     }
 }
 

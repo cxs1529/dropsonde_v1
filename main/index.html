@@ -17,22 +17,31 @@
 
         body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f4f6f9; color: #333; }
         h2 { color: var(--noaa-dark-blue); border-bottom: 3px solid var(--noaa-light-blue); padding-bottom: 10px; margin-top: 0; }
-        h3 { color: var(--noaa-dark-blue); }
+        h3 { color: var(--noaa-dark-blue); margin-top: 0; }
 
-        .status-banner { padding: 15px; margin-bottom: 20px; border-radius: 5px; font-size: 1.2em; font-weight: bold; text-align: center; color: #fff; transition: background-color 0.4s; }
+        /* Banners and Main Buttons */
+        .status-banner { padding: 15px; margin-bottom: 15px; border-radius: 5px; font-size: 1.2em; font-weight: bold; text-align: center; color: #fff; transition: background-color 0.4s; }
         .bg-logging { background: var(--noaa-green); }
         .bg-paused { background: var(--noaa-red); }
         
+        .deploy-container { text-align: center; margin-bottom: 25px; }
+        button.btn-deploy { background: var(--noaa-green); font-size: 1.1em; padding: 12px 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); border: none; border-radius: 4px; color: #fff; cursor: pointer; font-weight: bold; transition: background 0.2s;}
+        button.btn-deploy:hover { background: #218838; }
+
+        /* Live Telemetry Box */
         .live-box { background: #fff; border-top: 5px solid var(--noaa-dark-blue); padding: 20px; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); margin-bottom: 25px; }
-        
-        /* Dashboard Instrument Grid */
         .telemetry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-top: 15px; }
         .data-box { background: var(--noaa-gray); padding: 15px; border-radius: 6px; border-left: 4px solid var(--noaa-light-blue); text-align: center; }
         .data-box .label { font-size: 0.8em; color: var(--noaa-dark-blue); font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
         .data-box .value { font-size: 1.4em; font-family: monospace; color: #111; font-weight: bold; margin-top: 8px; display: block; }
         
-        /* Two-Column File Layout */
-        .flex-container { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 15px; }
+        /* File Management Section */
+        .table-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .storage-info { font-size: 0.7em; color: #555; font-weight: normal; margin-left: 10px; background: #fff; padding: 4px 10px; border-radius: 20px; border: 1px solid #ccc; display: inline-block;}
+        button.btn-refresh { padding: 8px 15px; background: var(--noaa-light-blue); color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        button.btn-refresh:hover { background: var(--noaa-dark-blue); }
+
+        .flex-container { display: flex; flex-wrap: wrap; gap: 20px; }
         .table-container { flex: 2; min-width: 300px; }
         .summary-container { flex: 1; min-width: 250px; background: #fff; border: 1px solid #ddd; border-top: 5px solid var(--noaa-light-blue); padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); height: fit-content; position: sticky; top: 20px; }
         
@@ -42,11 +51,6 @@
         tr.file-row { cursor: pointer; transition: background-color 0.2s; }
         tr.file-row:hover { background-color: var(--noaa-gray); }
         
-        button { padding: 10px 15px; margin-bottom: 10px; background: var(--noaa-light-blue); color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s;}
-        button:hover { background: var(--noaa-dark-blue); }
-        button.btn-deploy { background: var(--noaa-green); float: right; }
-        button.btn-deploy:hover { background: #218838; }
-
         a { color: var(--noaa-dark-blue); text-decoration: none; font-weight: bold;}
         a:hover { text-decoration: underline; color: var(--noaa-light-blue); }
 
@@ -54,14 +58,7 @@
         .summary-item:last-child { border-bottom: none; }
         .summary-label { font-size: 0.85em; color: #666; text-transform: uppercase; font-weight: bold; }
         .summary-value { font-family: monospace; font-size: 1.05em; color: var(--noaa-dark-blue); margin-top: 5px; word-break: break-all; }
-
-        #mapContainer { height: 500px; width: 100%; border: 3px solid var(--noaa-dark-blue); border-radius: 5px; display: none; margin-top: 15px; box-sizing: border-box; }
-        .map-legend { background: rgba(255,255,255,0.9); padding: 10px; border-radius: 5px; border: 1px solid #ccc; font-size: 0.9em; font-family: Arial, sans-serif; }
-        .legend-dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 5px; border: 1px solid #000; vertical-align: middle; }
     </style>
-
-    <link rel="stylesheet" href="/asset?file=leaflet.css" />
-    <script src="/asset?file=leaflet.js"></script>
 </head>
 <body>
     <h2>NOAA/AOML Dropsonde Dashboard</h2>
@@ -70,8 +67,13 @@
         STATUS: PAUSED - Waiting for hardware switch...
     </div>
 
+    <!-- Centered Deployment Button -->
+    <div class="deploy-container">
+        <button class="btn-deploy" onclick="triggerNewDeployment()">+ Start New Deployment File</button>
+    </div>
+
     <div class="live-box">
-        <h3 style="margin:0;">Live Telemetry</h3>
+        <h3>Live Telemetry</h3>
         <div class="telemetry-grid">
             <div class="data-box"><span class="label">Date & Time (UTC)</span><span class="value" id="valTime">--/--/-- --:--:--</span></div>
             <div class="data-box"><span class="label">Latitude</span><span class="value" id="valLat">--.------</span></div>
@@ -81,214 +83,101 @@
         </div>
     </div>
 
-    <h3>
-        Internal Storage
-        <button class="btn-deploy" onclick="triggerNewDeployment()">+ Start New Deployment File</button>
-    </h3>
+    <!-- Table Header Row with Storage Metrics -->
+    <div class="table-header-row">
+        <h3 style="display: flex; align-items: center; margin: 0;">
+            Internal Storage 
+            <span class="storage-info" id="storageMetrics">Calculating storage...</span>
+        </h3>
+        <button class="btn-refresh" onclick="loadFiles()">Refresh File List</button>
+    </div>
     
+    <!-- Table and Metadata Container side-by-side -->
     <div class="flex-container">
         <div class="table-container">
-            <button onclick="loadFiles()">Refresh File List</button>
             <table id="fileTable">
                 <tr><th>File Name</th><th>Size</th><th>Actions</th></tr>
             </table>
         </div>
         
         <div class="summary-container" id="summaryPanel">
-            <h3 style="margin-top:0; color:var(--noaa-dark-blue);">File Metadata</h3>
+            <h3 style="color:var(--noaa-dark-blue);">File Metadata</h3>
             <p style="color:#666;">Select a data file to view metrics.</p>
         </div>
     </div>
 
-    <div id="mapContainer"></div>
-
     <script>
         let fileDataMap = {};
-        let map = null;
-        let trackLayer = null;
 
-        function toRad(degrees) { return degrees * Math.PI / 180; }
-        function toDeg(radians) { return radians * 180 / Math.PI; }
-
-        function calcDistanceMeters(lat1, lon1, lat2, lon2) {
-            const R = 6371e3; 
-            const p1 = toRad(lat1), p2 = toRad(lat2);
-            const dp = toRad(lat2 - lat1);
-            const dl = toRad(lon2 - lon1);
-            const a = Math.sin(dp/2) * Math.sin(dp/2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            return R * c; 
-        }
-
-        function calcHeading(lat1, lon1, lat2, lon2) {
-            const p1 = toRad(lat1), p2 = toRad(lat2);
-            const dl = toRad(lon2 - lon1);
-            const y = Math.sin(dl) * Math.cos(p2);
-            const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
-            const t = Math.atan2(y, x);
-            return (toDeg(t) + 360) % 360;
-        }
-
-        function parseTimestamp(dateStr, timeStr) {
-            let [m, d, y] = dateStr.split('/');
-            let [hr, min, sec] = timeStr.split(':');
-            return new Date(Date.UTC(2000 + parseInt(y), parseInt(m)-1, parseInt(d), parseInt(hr), parseInt(min), parseInt(sec)));
-        }
-
-        // Robust parsing of Degree-Minute or Decimal coordinates
-        function parseCoordinate(coordStr) {
-            if (!coordStr) return 0;
-            coordStr = coordStr.trim();
-            let dir = coordStr.slice(-1);
-            let numStr = coordStr.slice(0, -1).trim();
-            let spaceIdx = numStr.indexOf(' ');
-            if (spaceIdx !== -1) {
-                let deg = parseFloat(numStr.substring(0, spaceIdx));
-                let min = parseFloat(numStr.substring(spaceIdx + 1));
-                let val = deg + (min / 60.0);
-                if (dir === 'S' || dir === 'W') val = -val;
-                return val;
-            } else {
-                let val = parseFloat(coordStr);
-                return isNaN(val) ? 0 : val;
-            }
-        }
-
-        function plotFileOnMap(fileName) {
-            document.getElementById('mapContainer').style.display = 'block';
-            
-            if (!map) {
-                map = L.map('mapContainer', { zoomControl: true, attributionControl: false });
-                map.setView([26.5, -79.5], 7);
-
-                fetch('/asset?file=depths.json')
-                    .then(res => res.json())
-                    .then(data => {
-                        L.geoJSON(data, {
-                            style: function (feature) {
-                                return { color: '#00A9E0', weight: 1, opacity: 0.5 };
-                            }
-                        }).addTo(map);
-                    }).catch(err => console.log("Map vectors not found, proceeding without bathymetry."));
-
-                let legend = L.control({position: 'bottomright'});
-                legend.onAdd = function (map) {
-                    let div = L.DomUtil.create('div', 'map-legend');
-                    div.innerHTML = 
-                        '<div style="margin-bottom:5px;"><b>GPS Lock Status</b></div>' +
-                        '<div><span class="legend-dot" style="background:var(--noaa-green);"></span> 3D Fix</div>' +
-                        '<div><span class="legend-dot" style="background:var(--noaa-yellow);"></span> 2D Fix</div>' +
-                        '<div><span class="legend-dot" style="background:#6c757d;"></span> No Fix / Dropped</div>';
-                    return div;
-                };
-                legend.addTo(map);
-            }
-
-            if (trackLayer) map.removeLayer(trackLayer);
-            trackLayer = L.layerGroup().addTo(map);
-
-            fetch('/view?file=' + fileName).then(response => response.text()).then(text => {
-                let lines = text.split('\n');
-                let validPositions = [];
-                let lastValidPoint = null;
-                let lastTime = null;
-
-                for(let line of lines) {
-                    let parts = line.split('  '); 
-                    // Matches GPS line (Line 1 of each 2-line record)
-                    if(parts.length >= 6 && !line.startsWith("P=")) {
-                        let dateStr = parts[0];
-                        let timeStr = parts[1];
-                        let lat = parseCoordinate(parts[2]);
-                        let lon = parseCoordinate(parts[3]);
-                        let fixStr = parts[5]; 
-                        
-                        let fixType = 0; 
-                        if (fixStr.includes("TYPE: 3")) fixType = 3;
-                        else if (fixStr.includes("TYPE: 2")) fixType = 2;
-
-                        let hasCoords = (lat !== 0 && lon !== 0);
-                        let plotLat = hasCoords ? lat : (lastValidPoint ? lastValidPoint.lat : null);
-                        let plotLon = hasCoords ? lon : (lastValidPoint ? lastValidPoint.lon : null);
-
-                        if (plotLat !== null && plotLon !== null) {
-                            let color = '#6c757d'; 
-                            if (fixType === 3) color = 'var(--noaa-green)'; 
-                            else if (fixType === 2) color = 'var(--noaa-yellow)'; 
-
-                            let speedMs = 0, speedKts = 0, heading = 0;
-                            let currentTime = parseTimestamp(dateStr, timeStr);
-
-                            if (hasCoords && lastValidPoint && lastTime) {
-                                let timeDiffSec = (currentTime - lastTime) / 1000; 
-                                if (timeDiffSec > 0) {
-                                    let distance = calcDistanceMeters(lastValidPoint.lat, lastValidPoint.lon, lat, lon);
-                                    speedMs = distance / timeDiffSec; 
-                                    speedKts = speedMs * 1.94384; 
-                                    heading = calcHeading(lastValidPoint.lat, lastValidPoint.lon, lat, lon);
-                                }
-                            }
-
-                            if (hasCoords) {
-                                lastValidPoint = {lat: lat, lon: lon};
-                                lastTime = currentTime;
-                            }
-
-                            let tooltipHtml = `<b>Time:</b> ${dateStr} ${timeStr}<br>`;
-                            if (hasCoords) {
-                                tooltipHtml += `<b>Position:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}<br>`;
-                                tooltipHtml += `<b>Speed:</b> ${speedMs.toFixed(1)} m/s (${speedKts.toFixed(1)} kts)<br>`;
-                                tooltipHtml += `<b>Heading:</b> ${heading.toFixed(0)}°<br>`;
-                                tooltipHtml += `<b>Lock:</b> ${fixStr}<br>`;
-                            } else {
-                                tooltipHtml += `<b>Lock:</b> No Fix (RTC Timer Fallback)<br>`;
-                                tooltipHtml += `<i>Coordinates carried over from last known position.</i>`;
-                            }
-
-                            L.circleMarker([plotLat, plotLon], {
-                                radius: 4, fillColor: color, color: '#000', weight: 1, opacity: 1, fillOpacity: 0.9
-                            }).bindTooltip(tooltipHtml).addTo(trackLayer);
-                            
-                            validPositions.push([plotLat, plotLon]);
-                        }
-                    }
-                }
-
-                if (validPositions.length > 0) {
-                    L.polyline(validPositions, {color: '#333', weight: 1.5, opacity: 0.5}).addTo(trackLayer);
-                    map.fitBounds(L.polyline(validPositions).getBounds());
-                } else {
-                    alert("No valid GPS fixes found in this file to plot on the map.");
-                }
-            });
+        // Helper to format bytes cleanly (KB, MB, GB)
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
         function showSummary(fileName) {
             let d = fileDataMap[fileName];
             if(!d) return;
+
+            let safeLines = (d.lines !== undefined && !isNaN(d.lines)) ? Number(d.lines).toLocaleString() : "0";
+            let safeFirst = d.first || "N/A";
+            let safeLast = d.last || "N/A";
+
             document.getElementById('summaryPanel').innerHTML = `
-                <h3 style="margin-top:0; color:var(--noaa-dark-blue);">${d.name}</h3>
+                <h3 style="color:var(--noaa-dark-blue);">${d.name}</h3>
                 <div class="summary-item">
                     <div class="summary-label">Estimated Data Points</div>
-                    <div class="summary-value">${d.lines.toLocaleString()}</div>
+                    <div class="summary-value">${safeLines}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">Initial Timestamp & Position</div>
-                    <div class="summary-value">${d.first}</div>
+                    <div class="summary-value">${safeFirst}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">Final Timestamp & Position</div>
-                    <div class="summary-value">${d.last}</div>
+                    <div class="summary-value">${safeLast}</div>
                 </div>
             `;
         }
 
+        function updateStorageMetrics() {
+            document.getElementById('storageMetrics').innerText = "Calculating storage...";
+            document.getElementById('storageMetrics').style.color = "#888";
+            
+            fetch('/api/storage')
+            .then(r => r.text()) // Fetch as plain text first
+            .then(text => {
+                try {
+                    let d = JSON.parse(text); // Try parsing it manually
+                    if (d.total === 0) {
+                        document.getElementById('storageMetrics').innerText = "Storage metrics unavailable (Check Mount Path)";
+                    } else {
+                        document.getElementById('storageMetrics').innerText = 
+                            `Total: ${formatBytes(d.total)} | Used: ${formatBytes(d.used)} | Free: ${formatBytes(d.free)}`;
+                        document.getElementById('storageMetrics').style.color = "#555";
+                    }
+                } catch(e) {
+                    document.getElementById('storageMetrics').innerText = "Storage metrics unavailable";
+                    console.error("Failed to parse storage JSON. Server returned:", text);
+                }
+            })
+            .catch(e => {
+                document.getElementById('storageMetrics').innerText = "Storage metrics unavailable";
+                console.error("Network error fetching storage metrics: ", e);
+            });
+        }
+
         function loadFiles() {
+            // Asynchronously trigger the heavy storage calculation
+            updateStorageMetrics();
 
             fetch('/api/list').then(r => r.json()).then(data => {
                 
-                // --- CHRONOLOGICAL DESCENDING SORT ---
-                // Reversing string comparison puts newest files (latest timestamp) on top.
+                if (!Array.isArray(data)) data = [];
+                
                 data.sort((a, b) => {
                     if (a.name > b.name) return -1;
                     if (a.name < b.name) return 1;
@@ -302,20 +191,27 @@
                     fileDataMap[f.name] = f;
                     html += `<tr class="file-row" onclick="showSummary('${f.name}')">
                     <td>${f.name}</td><td>${(f.size / 1024).toFixed(1)} KB</td><td>
-                    <a href="#" onclick="plotFileOnMap('${f.name}'); event.stopPropagation();" style="color:var(--noaa-dark-blue);">Map</a> | 
+                    <a href="/map_asset?file=viewer.html&data=${f.name}" target="_blank" style="color:var(--noaa-dark-blue);" onclick="event.stopPropagation()">Map</a> | 
                     <a href="/view?file=${f.name}" target="_blank" style="color:var(--noaa-green);" onclick="event.stopPropagation()">Read</a> | 
-                    <a href="/download?file=${f.name}" onclick="event.stopPropagation()">Download</a> | 
+                    <a href="/download?file=${f.name}" download="${f.name}" onclick="event.stopPropagation()">Download</a> | 
                     <a href="#" id="del-${f.name}" onclick="deleteFile('${f.name}', event)" style="color:var(--noaa-red);">Delete</a></td></tr>`;
                 });
                 
                 document.getElementById('fileTable').innerHTML = html;
                 
-                if(data.length > 0) showSummary(data[0].name);
-                else document.getElementById('summaryPanel').innerHTML = `<p style="color:#666;">No files found in DATA directory.</p>`;
+                if(data.length > 0) {
+                    showSummary(data[0].name);
+                } else {
+                    document.getElementById('summaryPanel').innerHTML = `
+                        <h3 style="color:var(--noaa-dark-blue);">File Metadata</h3>
+                        <p style="color:#666;">No valid .txt files found in DATA directory.</p>
+                    `;
+                }
+            }).catch(e => {
+                console.error("Error fetching file list: ", e);
             });
         }
 
-        // Start New Deployment feature with confirmation warning
         function triggerNewDeployment() {
             if (confirm("WARNING: Are you sure you want to finalize the active file and start a NEW deployment log?")) {
                 fetch('/api/manage?action=new_file', {method: 'POST'}).then(response => {
@@ -339,6 +235,7 @@
             }
         }
 
+        // 500ms lightweight polling loop (unaffected by heavy storage calculations)
         setInterval(() => {
             fetch('/api/live').then(r => r.json()).then(d => {
                 document.getElementById('valTime').innerText = `${d.date} ${d.time}`;
