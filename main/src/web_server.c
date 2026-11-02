@@ -32,6 +32,8 @@
 static const char *TAG = "WEB_SERVER";
 static httpd_handle_t web_server_handle = NULL;
 
+extern char force_new_file_note[256];
+
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 
@@ -64,6 +66,7 @@ static esp_err_t live_api_get_handler(httpd_req_t *req) {
     return httpd_resp_send(req, json_resp, strlen(json_resp));
 }
 
+
 static esp_err_t list_get_handler(httpd_req_t *req) {
     DIR *dir = opendir(DATA_DIR);
     if (!dir) { httpd_resp_send_500(req); return ESP_FAIL; }
@@ -73,11 +76,12 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
     
     struct dirent *ent; 
     bool first_item = true; 
-    char chunk[512];
+    char chunk[768]; 
     
     while ((ent = readdir(dir)) != NULL) {
-        // STRICT FILTER: Ignore metadata files and ensure the file ends exactly with ".txt"
+        // STRICT FILTER: Ignore any file that doesn't end exactly with ".txt", or is a meta/note file
         if (strstr(ent->d_name, "_meta.txt") != NULL) continue;
+        if (strstr(ent->d_name, "_note.txt") != NULL) continue;
         
         char *ext = strstr(ent->d_name, ".txt");
         if (ext == NULL || strcmp(ext, ".txt") != 0) continue;
@@ -88,23 +92,35 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
         stat(path, &st);
         
         char meta_path[300];
+        char note_path[300];
         int base_len = strlen(ent->d_name) - 4; // Strip the ".txt"
+        
         snprintf(meta_path, sizeof(meta_path), "%s/%.*s_meta.txt", META_DIR, base_len, ent->d_name);
+        snprintf(note_path, sizeof(note_path), "%s/%.*s_note.txt", META_DIR, base_len, ent->d_name);
         
         long lines = 0; 
-        char first_line[64] = "N/A", last_line[64] = "N/A";
+        char first_line[64] = "N/A", last_line[64] = "N/A", note_line[256] = "N/A";
         
+        // 1. Read dynamic metadata
         FILE *fm = fopen(meta_path, "r");
         if (fm) {
-            char buf[64];
+            char buf[128];
             if (fgets(buf, sizeof(buf), fm)) lines = atol(buf);
             if (fgets(buf, sizeof(buf), fm)) { buf[strcspn(buf, "\r\n")] = 0; strncpy(first_line, buf, 63); }
             if (fgets(buf, sizeof(buf), fm)) { buf[strcspn(buf, "\r\n")] = 0; strncpy(last_line, buf, 63); }
             fclose(fm);
         }
+
+        // 2. Read static deployment note
+        FILE *fn = fopen(note_path, "r");
+        if (fn) {
+            char buf[256];
+            if (fgets(buf, sizeof(buf), fn)) { buf[strcspn(buf, "\r\n")] = 0; strncpy(note_line, buf, 255); }
+            fclose(fn);
+        }
         
-        snprintf(chunk, sizeof(chunk), "%s{\"name\":\"%s\",\"size\":%ld,\"lines\":%ld,\"first\":\"%s\",\"last\":\"%s\"}", 
-                 first_item ? "" : ",", ent->d_name, (long)st.st_size, lines, first_line, last_line);
+        snprintf(chunk, sizeof(chunk), "%s{\"name\":\"%s\",\"size\":%ld,\"lines\":%ld,\"first\":\"%s\",\"last\":\"%s\",\"note\":\"%s\"}", 
+                 first_item ? "" : ",", ent->d_name, (long)st.st_size, lines, first_line, last_line, note_line);
         httpd_resp_send_chunk(req, chunk, strlen(chunk));
         first_item = false;
     }
@@ -114,6 +130,7 @@ static esp_err_t list_get_handler(httpd_req_t *req) {
     httpd_resp_send_chunk(req, NULL, 0); 
     return ESP_OK;
 }
+
 
 /** 
  * @brief Streams file downloads over HTTP in 1KB chunks.
@@ -181,14 +198,46 @@ static esp_err_t view_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+
 static esp_err_t manage_post_handler(httpd_req_t *req) {
-    char query[256]; char action[32], file[64], path[128];
+    char query[512]; 
+    char action[32], file[64], path[128];
+    
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) return ESP_FAIL;
     httpd_query_key_value(query, "action", action, sizeof(action));
 
     // Handle New Deployment request from Dashboard
     if (strcmp(action, "new_file") == 0) {
+        char url_decoded_note[256] = "N/A";
+        char raw_note[256] = "";
+        
+        if (httpd_query_key_value(query, "note", raw_note, sizeof(raw_note)) == ESP_OK) {
+            int r = 0, w = 0;
+            while(raw_note[r] != '\0' && w < 255) {
+                if (raw_note[r] == '%' && raw_note[r+1] != '\0' && raw_note[r+2] != '\0') {
+                    int val;
+                    if (sscanf(&raw_note[r+1], "%2x", &val) == 1) {
+                        url_decoded_note[w++] = (char)val;
+                        r += 3;
+                    } else {
+                        url_decoded_note[w++] = raw_note[r++];
+                    }
+                } else if (raw_note[r] == '+') {
+                    url_decoded_note[w++] = ' ';
+                    r++;
+                } else {
+                    url_decoded_note[w++] = raw_note[r++];
+                }
+            }
+            url_decoded_note[w] = '\0';
+        }
+
+        xSemaphoreTake(live_data_mutex, portMAX_DELAY);
+        strncpy(force_new_file_note, url_decoded_note, sizeof(force_new_file_note) - 1);
+        force_new_file_note[255] = '\0'; 
         force_new_file_flag = true; 
+        xSemaphoreGive(live_data_mutex);
+        
         httpd_resp_sendstr(req, "OK");
         return ESP_OK;
     }
@@ -208,12 +257,18 @@ static esp_err_t manage_post_handler(httpd_req_t *req) {
         }
 
         snprintf(path, sizeof(path), "%s/%s", DATA_DIR, file);
+        
         char meta_path[128];
-        snprintf(meta_path, sizeof(meta_path), "%s/%s.META", META_DIR, file);
+        char note_path[128];
+        int base_len = strlen(file) - 4; // Strip the ".txt"
+        
+        snprintf(meta_path, sizeof(meta_path), "%s/%.*s_meta.txt", META_DIR, base_len, file);
+        snprintf(note_path, sizeof(note_path), "%s/%.*s_note.txt", META_DIR, base_len, file);
 
         unlink(path);
         unlink(meta_path);
-        printf("\n[WEB SERVER DELETE] Deleted %s and corresponding .META file\n", file);
+        unlink(note_path);
+        printf("\n[WEB SERVER DELETE] Deleted %s, .meta, and .note files\n", file);
     }
     
     httpd_resp_sendstr(req, "OK");
@@ -228,7 +283,7 @@ static esp_err_t manage_post_handler(httpd_req_t *req) {
  */
 static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t err) {
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_set_hdr(req, "Location", "http://dropsonde.com/");
     httpd_resp_set_hdr(req, "Connection", "close"); // FIX: Free the socket immediately
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
@@ -353,6 +408,9 @@ static void start_webserver(void) {
     // OVERRIDE: ESP-IDF defaults to 8 maximum URI handlers. 
     // We are registering 9, so we must increase this limit!
     config.max_uri_handlers = 12;
+    // Increase default HTTPD task stack from 4096 to 8192
+    // to handle the large character buffers used in the JSON file parser.
+    config.stack_size = 8192;
 
     if (httpd_start(&web_server_handle, &config) == ESP_OK) {
 

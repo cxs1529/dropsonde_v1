@@ -34,6 +34,7 @@
 static const char *TAG = "SD_LOG";
 static sdmmc_card_t *sd_card = NULL;
 static char active_log_filename[64] = "";
+char force_new_file_note[256] = "N/A";
 
 /**
  * @brief RAM cache tracking file size, limits, and GPS coordinate locks.
@@ -294,29 +295,60 @@ void gps_log_task(void *arg) {
         TickType_t current_time = xTaskGetTickCount();
         bool physical_switch_is_logging = (gpio_get_level(LOG_SWITCH_PIN) == 0);
 
-        // --- DASHBOARD OVERRIDE: FORCE NEW FILE ---
+        // --- FILE ROTATION TRIGGER ---
         if (force_new_file_flag) {
-            force_new_file_flag = false; // Reset trigger
             if (f != NULL) {
                 fflush(f);
                 fsync(fileno(f));
                 fclose(f);
                 f = NULL;
-                save_metadata();
             }
+            
+            // Use your existing helper to generate a safe, collision-free filename
             get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
             
-            if (logical_logging_state && sd_card != NULL) {
-                char data_path[128];
-                snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, active_log_filename);
-                f = fopen(data_path, "a");
-                if (f != NULL) {
-                    setvbuf(f, NULL, _IOFBF, 4096); // Re-establish 4KB buffer on new file
-                    load_metadata();
-                    printf("\n  [NEW DEPLOYMENT FILE INITIATED : %s]\n\n", active_log_filename);
-                    fflush(stdout); 
-                }
+            // Extract the base filename (remove ".txt") to name the meta/note files
+            char base_filename[64];
+            strncpy(base_filename, active_log_filename, sizeof(base_filename));
+            char *ext = strstr(base_filename, ".txt");
+            if (ext) *ext = '\0';
+
+            // 1. Create Data File
+            char data_path[128];
+            snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, active_log_filename);
+            f = fopen(data_path, "a");
+
+            // 2. Create base Metadata File
+            char meta_filename[128];
+            snprintf(meta_filename, sizeof(meta_filename), "%s/%s_meta.txt", META_DIR, base_filename);
+            FILE *meta_f = fopen(meta_filename, "w");
+            if (meta_f) {
+                fprintf(meta_f, "0\nN/A\nN/A\n");
+                fclose(meta_f);
             }
+
+            // 3. Create the Static Note File
+            char note_filename[128];
+            snprintf(note_filename, sizeof(note_filename), "%s/%s_note.txt", META_DIR, base_filename);
+            FILE *note_f = fopen(note_filename, "w");
+            if (note_f) {
+                fprintf(note_f, "%s\n", force_new_file_note);
+                fclose(note_f);
+            }
+
+            // Reset correct struct metrics and flags for the new file
+            current_meta.lines = 0;
+            current_meta.first_valid_found = false;
+            strcpy(current_meta.first_record, "N/A");
+            strcpy(current_meta.last_record, "N/A");
+            strcpy(force_new_file_note, "N/A"); 
+            
+            xSemaphoreTake(live_data_mutex, portMAX_DELAY);
+            strncpy(live_active_file, active_log_filename, sizeof(live_active_file));
+            force_new_file_flag = false;
+            xSemaphoreGive(live_data_mutex);
+            
+            printf("\n>>> ROTATED TO NEW DEPLOYMENT LOG: %s\n", active_log_filename);
         }
 
         // --- EDGE DETECTION TERMINAL OUTPUT ---
