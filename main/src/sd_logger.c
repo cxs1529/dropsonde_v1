@@ -18,6 +18,8 @@
 #include "config.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "diskio_impl.h"
+#include "ff.h"
 #include "driver/spi_common.h"
 #include "driver/sdspi_host.h"
 #include "driver/gpio.h"
@@ -25,6 +27,7 @@
 #include <string.h>
 #include <sys/unistd.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <dirent.h>
 #include <time.h>
 
@@ -43,6 +46,68 @@ typedef struct {
 } log_meta_t;
 
 static log_meta_t current_meta = {0, false, "N/A", "N/A"};
+
+
+static void auto_format_bytes(uint64_t bytes, char *out_str, size_t max_len) {
+    const char *units[] = {"B", "KB", "MB", "GB", "TB"};
+    int unit_idx = 0;
+    double size = (double)bytes;
+
+    while (size >= 1024.0 && unit_idx < 4) {
+        size /= 1024.0;
+        unit_idx++;
+    }
+
+    if (unit_idx == 0) {
+        snprintf(out_str, max_len, "%llu B", (unsigned long long)bytes);
+    } else {
+        snprintf(out_str, max_len, "%.2f %s", size, units[unit_idx]);
+    }
+}
+
+
+/**
+ * @brief Directly queries FatFs for cluster allocation (bypasses POSIX VFS path lookup)
+ */
+static bool get_sd_capacity_strings(char *total_str, char *used_str, char *free_str, size_t str_len) {
+    FATFS *fs;
+    DWORD fre_clust;
+
+    // FatFs function to get free clusters on default/first physical drive ("0:")
+    FRESULT res = f_getfree("0:", &fre_clust, &fs);
+    if (res != FR_OK || fs == NULL) {
+        // Fallback: try querying without drive number in case drive mapping is default
+        res = f_getfree("", &fre_clust, &fs);
+    }
+
+    if (res != FR_OK || fs == NULL) {
+        snprintf(total_str, str_len, "ERR (%d)", res);
+        snprintf(used_str,  str_len, "ERR (%d)", res);
+        snprintf(free_str,  str_len, "ERR (%d)", res);
+        return false;
+    }
+
+    // Total and free sectors
+    uint64_t tot_sect = (uint64_t)(fs->n_fatent - 2) * fs->csize;
+    uint64_t fre_sect = (uint64_t)fre_clust * fs->csize;
+
+    // Sector size (typically 512 bytes)
+#if FF_MAX_SS != FF_MIN_SS
+    uint64_t sector_size = fs->ssize;
+#else
+    uint64_t sector_size = 512;
+#endif
+
+    uint64_t total_bytes = tot_sect * sector_size;
+    uint64_t free_bytes  = fre_sect * sector_size;
+    uint64_t used_bytes  = (total_bytes > free_bytes) ? (total_bytes - free_bytes) : 0;
+
+    auto_format_bytes(total_bytes, total_str, str_len);
+    auto_format_bytes(used_bytes,  used_str,  str_len);
+    auto_format_bytes(free_bytes,  free_str,  str_len);
+    return true;
+}
+
 
 /** 
  * @brief Strips down the full telemetry payload into a compact string for the UI metadata.
@@ -383,10 +448,16 @@ void gps_log_task(void *arg) {
                     fflush(f); 
                     fsync(fileno(f)); 
                     last_sync_time = current_time;
-                    
-                    // Throttled terminal banner so user knows data is surviving
+
+                    char total_str[32] = "N/A";
+                    char used_str[32]  = "N/A";
+                    char free_str[32]  = "N/A";
+
+                    get_sd_capacity_strings(total_str, used_str, free_str, sizeof(total_str));
+
                     printf("\n====================================================\n");
                     printf("[LOGGING BUFFER SYNCED : %s]\n", active_log_filename);
+                    printf("Total: %s | Used: %s | Free: %s\n", total_str, used_str, free_str);
                     printf("====================================================\n\n");
                     fflush(stdout); 
                 }

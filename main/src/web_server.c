@@ -20,6 +20,7 @@
 #include "esp_wifi.h"
 #include "esp_http_server.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
 #include "driver/gpio.h"
 #include <sys/statvfs.h>
 #include <stdio.h>
@@ -305,24 +306,32 @@ static esp_err_t favicon_get_handler(httpd_req_t *req) {
  * @brief Retrieves SD card storage metrics safely, always returning JSON.
  */
 static esp_err_t storage_api_get_handler(httpd_req_t *req) {
-    uint64_t total_bytes = 0;
-    uint64_t free_bytes = 0;
-    
-    // Explicitly use your exact mount point string here (no trailing slashes)
-    const char* base_path = "/sdcard"; 
-    
-    esp_err_t err = esp_vfs_fat_info(base_path, &total_bytes, &free_bytes);
-    
-    if (err != ESP_OK) {
-        ESP_LOGE("WEB_SERVER", "Failed to read FAT info from %s. Error: %s", base_path, esp_err_to_name(err));
-        // Fallback to zeroes so the UI parser doesn't crash
-        total_bytes = 0;
-        free_bytes = 0;
+    FATFS *fs = NULL;
+    DWORD fre_clust = 0;
+
+    FRESULT res = f_getfree("0:", &fre_clust, &fs);
+    if (res != FR_OK || fs == NULL) {
+        res = f_getfree("", &fre_clust, &fs);
     }
 
-    uint64_t used_bytes = total_bytes > free_bytes ? (total_bytes - free_bytes) : 0;
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+    uint64_t used_bytes = 0;
+
+    if (res == FR_OK && fs != NULL) {
+        uint64_t tot_sect = (uint64_t)(fs->n_fatent - 2) * fs->csize;
+        uint64_t fre_sect = (uint64_t)fre_clust * fs->csize;
+#if FF_MAX_SS != FF_MIN_SS
+        uint64_t sector_size = fs->ssize;
+#else
+        uint64_t sector_size = 512;
+#endif
+        total_bytes = tot_sect * sector_size;
+        free_bytes  = fre_sect * sector_size;
+        used_bytes  = (total_bytes > free_bytes) ? (total_bytes - free_bytes) : 0;
+    }
+
     char json_response[128];
-    
     snprintf(json_response, sizeof(json_response), 
              "{\"total\":%llu,\"used\":%llu,\"free\":%llu}", 
              (unsigned long long)total_bytes, 
@@ -340,6 +349,10 @@ static void start_webserver(void) {
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.max_req_hdr_len = 2048;
     config.lru_purge_enable = true;
+    
+    // OVERRIDE: ESP-IDF defaults to 8 maximum URI handlers. 
+    // We are registering 9, so we must increase this limit!
+    config.max_uri_handlers = 12;
 
     if (httpd_start(&web_server_handle, &config) == ESP_OK) {
 
@@ -365,6 +378,7 @@ static void start_webserver(void) {
         httpd_register_uri_handler(web_server_handle, &storage_uri);
     }
 }
+
 
 void wifi_manager_task(void *arg) {
     bool logical_wifi_state = false;
