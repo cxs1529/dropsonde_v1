@@ -68,3 +68,19 @@ Included in the `Extras` directory are tools for testing and visualization:
 *   **`viewer.html`**: A standalone Leaflet map viewer. Capable of reading the generated NMEA `.txt` files, calculating distance/drift speed, and rendering depth contours. 
 *   **`targets.csv`**: An example target waypoint file. Update this file and push it via the Dashboard's "Upload" button to change visible map targets in real-time.
 *   **`plan.html`**: A formatted HTML version of the NOAA Florida Current Dropsonde Cruise Plan, accessible directly from the main dashboard for field reference.
+
+## Images
+
+### Main Dashboard
+<img width="959" height="414" alt="dashboard" src="https://github.com/user-attachments/assets/7e0e673c-40cb-4d49-9344-bcde026770c0" />  
+
+### New Deployment
+<img width="959" height="334" alt="new-deployment-notes" src="https://github.com/user-attachments/assets/6b441f4d-f643-4b3b-ab17-5c1759081c30" />  
+
+### Bathymetry map w/ stations and GPS data
+<img width="956" height="413" alt="map-viewer" src="https://github.com/user-attachments/assets/d4f72be9-10f4-4701-a8dd-d8b2d0d00697" />  
+
+### Surface velocity estimates
+<img width="580" height="209" alt="gps-markers-drift-speed" src="https://github.com/user-attachments/assets/9c6d87e2-1ec0-4c50-9740-ed4dd44994b5" />  
+
+
