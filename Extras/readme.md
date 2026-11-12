@@ -16,23 +16,23 @@ SD\_CARD\_ROOT/
 
 │
 
-└── WEB/                        # Offline Web Assets (Must be loaded manually by user)
+└── .WEB/                        # Offline Web Assets (Must be loaded manually by user)
 
-&#x20;   ├── 27n-50c005t.geojson     # Bathymetry depth contours for map rendering
+    ├── 27n-50c005t.geojson     # Bathymetry depth contours for map rendering
 
-&#x20;   ├── leaflet.css             # Leaflet mapping engine stylesheet
+    ├── leaflet.css             # Leaflet mapping engine stylesheet
 
-&#x20;   ├── leaflet.js              # Leaflet mapping engine script
+    ├── leaflet.js              # Leaflet mapping engine script
 
-&#x20;   ├── plan.html               # Official NOAA dropsonde cruise plan document
+    ├── plan.html               # Official NOAA dropsonde cruise plan document
 
-&#x20;   ├── plot.html               # Offline zero-dependency HTML5 sensor charting viewer
+    ├── plot.html               # Offline zero-dependency HTML5 sensor charting viewer
 
-&#x20;   ├── targets.csv             # Custom map deployment target coordinates (uploadable via UI)
+    ├── targets.csv             # Custom map deployment target coordinates (uploadable via UI)
 
-&#x20;   ├── uPlot.iife.min.js       # Ultra-lightweight plotting engine for plot.html
+    ├── uPlot.iife.min.js       # Ultra-lightweight plotting engine for plot.html
 
-&#x20;   ├── uPlot.min.css           # uPlot engine stylesheet
+    ├── uPlot.min.css           # uPlot engine stylesheet
 
-&#x20;   └── viewer.html             # Leaflet-based GPS track visualization viewer
+    └── viewer.html             # Leaflet-based GPS track visualization viewer
 
