@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NOAA Florida Current Dropsonde Cruise Plan</title>
+    <style>
+        :root {
+            --noaa-dark-blue: #002868;
+            --noaa-light-blue: #00A9E0;
+            --noaa-gray: #e1e8f0;
+        }
+        body { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 20px; background: #f4f6f9; color: #333; }
+        .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); border-top: 6px solid var(--noaa-dark-blue); }
+        h1 { color: var(--noaa-dark-blue); text-align: center; border-bottom: 3px solid var(--noaa-light-blue); padding-bottom: 10px; margin-top: 0; }
+        table { width: 100%; border-collapse: collapse; margin: 25px 0; font-size: 0.95em; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: center; }
+        th { background-color: var(--noaa-dark-blue); color: white; position: sticky; top: 0; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        tr:hover { background-color: var(--noaa-gray); }
+        .instructions { background: var(--noaa-gray); padding: 20px; border-left: 5px solid var(--noaa-light-blue); border-radius: 4px; margin-top: 30px; }
+        .instructions h3 { margin-top: 0; color: var(--noaa-dark-blue); }
+        .instructions p { margin-bottom: 10px; }
+        .instructions strong { color: var(--noaa-dark-blue); }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>NOAA Florida Current Dropsonde Cruise Plan</h1>
+    
+    <table>
+        <thead>
+            <tr>
+                <th>Station Number</th>
+                <th>Planned Deployment Longitude</th>
+                <th>Planned Deployment Latitude</th>
+                <th>Approximate Recovery Longitude</th>
+                <th>Approximate Recovery Latitude</th>
+                <th>Water Depth (m)</th>
+                <th>Approximate time for cast</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>0</td><td>79° 55.800'W</td><td>27° 00.000′N</td><td>79° 55.800'W</td><td>27° 00.168'N</td><td>139</td><td>7 minutes</td></tr>
+            <tr><td>1</td><td>79° 52.000'W</td><td>27° 00.000′N</td><td>79° 52.000′W</td><td>27° 00.276'N</td><td>261</td><td>12 minutes</td></tr>
+            <tr><td>2</td><td>79° 47.000'W</td><td>27° 00.000′N</td><td>79° 47.000'W</td><td>27° 00.432'N</td><td>389</td><td>17 minutes</td></tr>
+            <tr><td>3</td><td>79° 41.000'W</td><td>27° 00.000′N</td><td>79° 41.000′W</td><td>27° 00.696'N</td><td>540</td><td>24 minutes</td></tr>
+            <tr><td>4</td><td>79° 37.000'W</td><td>27° 00.000′N</td><td>79° 37.000'W</td><td>27° 00.906'N</td><td>661</td><td>29 minutes</td></tr>
+            <tr><td>5</td><td>79° 30.000'W</td><td>27° 00.000′N</td><td>79° 30.000'W</td><td>27° 00.972'N</td><td>783</td><td>34 minutes</td></tr>
+            <tr><td>6</td><td>79° 23.000'W</td><td>27° 00.000′N</td><td>79° 23.000'W</td><td>27° 00.636'N</td><td>708</td><td>30 minutes</td></tr>
+            <tr><td>7</td><td>79° 17.000'W</td><td>27° 00.000′N</td><td>79° 17.000'W</td><td>27° 00.396'N</td><td>624</td><td>25 minutes</td></tr>
+            <tr><td>8</td><td>79° 12.000'W</td><td>27° 00.000′N</td><td>79° 12.000′W</td><td>27° 00.240'N</td><td>485</td><td>20 minutes</td></tr>
+        </tbody>
+    </table>
+
+    <div class="instructions">
+        <h3>Field Terminology Guide</h3>
+        <p><strong>Planned Deployment:</strong> This is the goal location for where we want to put the dropsonde in the water for the cast.</p>
+        <p><strong>Approximate Recovery:</strong> This is where we expect the dropsonde will surface again, within a few hundred yards. Note this ASSUMES THE DROPSONDE WAS DEPLOYED AT THE PLANNED SITE! Otherwise, use this as a guide for how far the dropsonde should have moved from the actual deployment site.</p>
+        <p><strong>Approximate length of time:</strong> This is an estimate for how long the dropsonde should be under water during each cast. This number may vary by a few minutes.</p>
+    </div>
+</div>
+
+</body>
+</html>

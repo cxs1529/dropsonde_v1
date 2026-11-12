@@ -34,6 +34,7 @@
  * 4. FreeRTOS TASK ARCHITECTURE:
  *    - Priority 10: `gps_rx_task` (UART1 reading and NMEA parsing)
  *    - Priority 6 : `gps_log_task` (SD card file management and debouncing)
+ *    - Priority 5 : `bme280_task` (I2C Environmental sensor polling)
  *    - Priority 4 : `wifi_manager_task` (10s debounced Wi-Fi power control)
  *    - Priority 2 : `gps_tail_task` (Verification reader running every 60s)
  * ==============================================================================
@@ -50,6 +51,9 @@
 #include "gps_parser.h"
 #include "sd_logger.h"
 #include "web_server.h"
+
+#include "sensor_task.h"
+
 
 static const char *TAG = "MAIN";
 
@@ -109,6 +113,9 @@ void app_main(void) {
         
         // Priority 6: Consumer task writes to SD card when OS time permits
         xTaskCreate(gps_log_task, "gps_log", 4096, NULL, 6, NULL);
+
+        // Priority 5: Read environmental data via I2C
+        xTaskCreate(bme280_task, "bme280", 4096, NULL, 5, NULL);
         
         // Priority 4: Background network management state machine
         xTaskCreate(wifi_manager_task, "wifi_mng", 4096, NULL, 4, NULL);

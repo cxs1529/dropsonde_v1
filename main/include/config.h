@@ -44,6 +44,13 @@
 #define PIN_NUM_MOSI    (GPIO_NUM_3)  ///< Master Out Slave In (DI)
 #define PIN_NUM_CS      (GPIO_NUM_4)  ///< Chip Select (SS)
 
+/*
+ * I2C Bus Pins:
+ * Configured for I2C mode on the ESP32-C3.
+ */
+#define I2C_SDA_PIN     (GPIO_NUM_5)  ///< I2C Data for BME280
+#define I2C_SCL_PIN     (GPIO_NUM_10) ///< I2C Clock for BME280
+// #define I2C_PORT        (I2C_NUM_0)   ///< Dedicated I2C Master Port
 
 // =================--- NETWORK CONFIGURATION ---=================
 

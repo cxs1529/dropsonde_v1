@@ -321,6 +321,37 @@
             }
         }
 
+        function uploadTargetsFile() {
+            const fileInput = document.getElementById('targetFileInput');
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            // Enforce CSV extension client-side
+            if (!file.name.toLowerCase().endsWith('.csv')) {
+                alert("Please select a valid targets.csv file.");
+                fileInput.value = ""; 
+                return;
+            }
+
+            // Send the raw file blob directly to avoid multipart/form-data parsing in C
+            fetch('/api/upload_targets', {
+                method: 'POST',
+                body: file
+            })
+            .then(response => {
+                if (response.ok) {
+                    alert("Map targets updated successfully!");
+                } else {
+                    alert("Failed to update targets.");
+                }
+                fileInput.value = ""; // Reset input
+            })
+            .catch(e => {
+                alert("Upload error: " + e);
+                fileInput.value = "";
+            });
+        }
+
         setInterval(() => {
             fetch('/api/live').then(r => r.json()).then(d => {
                 document.getElementById('valTime').innerText = `${d.date} ${d.time}`;
@@ -357,5 +388,29 @@
 
         window.onload = loadFiles;
     </script>
+
+    <!-- Map Targets -->
+    <div style="margin-top: 25px; padding: 20px; background: #fff; border-top: 5px solid var(--noaa-dark-blue); border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); text-align: center;">
+        <h3 style="color: var(--noaa-dark-blue); margin-top: 0; margin-bottom: 15px;">Map Targets</h3>
+        
+        <div style="display: flex; justify-content: center; gap: 15px;">
+            <!-- Download Button -->
+            <a href="/map_asset?file=targets.csv" download="targets.csv" style="background: var(--noaa-light-blue); padding: 10px 18px; color: #fff; border-radius: 4px; text-decoration: none; font-weight: bold; transition: background 0.2s;">Download</a>
+            
+            <!-- Hidden File Input -->
+            <input type="file" id="targetFileInput" accept=".csv" style="display: none;" onchange="uploadTargetsFile()">
+            
+            <!-- Upload Button -->
+            <button onclick="document.getElementById('targetFileInput').click()" style="background: var(--noaa-dark-blue); padding: 10px 18px; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s;">Upload</button>
+        </div>
+    </div>
+
+    <!-- Dropsonde Plan and Instructions -->
+    <div style="margin-top: 25px; margin-bottom: 40px; text-align: center;">
+        <a href="/map_asset?file=plan.html" target="_blank" style="display: inline-block; background: var(--noaa-green); padding: 12px 24px; color: #fff; border-radius: 4px; text-decoration: none; font-weight: bold; font-size: 1.1em; box-shadow: 0 4px 6px rgba(0,0,0,0.15); transition: background 0.2s;">Dropsonde Plan and Instructions</a>
+    </div>
+
+
+
 </body>
 </html>

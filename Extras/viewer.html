@@ -188,16 +188,46 @@
                 });
             }
 
-            fetch('/map_asset?file=stations').then(r => r.text()).then(text => {
-                text.split('\n').forEach(line => {
-                    let p = line.split(',');
-                    if (p.length >= 5 && !p[0].startsWith('#')) {
-                        stationDataCache.push({ name: p[0].trim(), lat: parseFloat(p[1].trim()), lon: parseFloat(p[2].trim()), color: p[3].trim(), size: parseFloat(p[4].trim()) });
-                    }
-                });
-                renderStations();
-            }).catch(e => console.warn("Stations not loaded"));
+            // --- Load Stations (Resilient CSV Parser) ---
+            fetch('/map_asset?file=targets.csv').then(r => {
+                if (!r.ok) throw new Error("Targets file not found on server.");
+                return r.text();
+            }).then(text => {
+                try {
+                    text.split('\n').forEach((line, index) => {
+                        let lineTrimmed = line.trim();
+                        // Ignore empty lines, comments, or malformed short lines
+                        if (lineTrimmed === '' || lineTrimmed.startsWith('#')) return; 
+                        
+                        let p = lineTrimmed.split(',');
+                        if (p.length >= 5) {
+                            let lat = parseFloat(p[1].trim());
+                            let lon = parseFloat(p[2].trim());
+                            let size = parseFloat(p[4].trim());
+                            
+                            // Guard against NaN resulting from bad CSV text inputs
+                            if (!isNaN(lat) && !isNaN(lon) && !isNaN(size)) {
+                                stationDataCache.push({ 
+                                    name: p[0].trim(), 
+                                    lat: lat, 
+                                    lon: lon, 
+                                    color: p[3].trim(), 
+                                    size: size 
+                                });
+                            } else {
+                                console.warn(`Skipping line ${index + 1}: Invalid coordinate or size number.`);
+                            }
+                        } else {
+                            console.warn(`Skipping line ${index + 1}: Insufficient CSV columns.`);
+                        }
+                    });
+                    renderStations();
+                } catch (parseError) {
+                    console.error("Critical error parsing targets.csv:", parseError);
+                }
+            }).catch(e => console.warn("Stations not loaded:", e.message));
 
+            
             // --- Load GeoJSON Isobaths ---
             function getDepthColor(depth) {
                 if (depth >= 1000) return '#000'; if (depth >= 950) return '#00008B'; if (depth >= 900) return '#0000CD'; if (depth >= 850) return '#0000FF';  

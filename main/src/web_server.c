@@ -42,7 +42,8 @@ extern const uint8_t favicon_ico_end[]   asm("_binary_favicon_ico_end");
 
 static esp_err_t index_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, (const char *)index_html_start, (index_html_end - index_html_start));
+    httpd_resp_send(req, (const char *)index_html_start, (index_html_end - index_html_start));
+    return ESP_OK; // Ignore socket drops
 }
 
 static esp_err_t live_api_get_handler(httpd_req_t *req) {
@@ -63,7 +64,8 @@ static esp_err_t live_api_get_handler(httpd_req_t *req) {
         local_data.lat, local_data.lon, local_data.pdop, local_data.fix_desc, local_logging ? "true" : "false", local_active_file);
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json_resp, strlen(json_resp));
+    httpd_resp_send(req, json_resp, strlen(json_resp));
+    return ESP_OK; // Ignore socket drops
 }
 
 
@@ -282,11 +284,22 @@ static esp_err_t manage_post_handler(httpd_req_t *req) {
  * and forces a 302 redirect to the main dashboard.
  */
 static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t err) {
+    // Purge lingering POST bodies from background OS internet checks
+    if (req->method == HTTP_POST && req->content_len > 0) {
+        char buf[256];
+        int remaining = req->content_len;
+        while (remaining > 0) {
+            int to_recv = remaining < sizeof(buf) ? remaining : sizeof(buf);
+            if (httpd_req_recv(req, buf, to_recv) <= 0) break;
+            remaining -= to_recv;
+        }
+    }
+    
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "http://dropsonde.com/");
-    httpd_resp_set_hdr(req, "Connection", "close"); // FIX: Free the socket immediately
+    httpd_resp_set_hdr(req, "Location", "http://aoml-dropsonde.com/");
+    httpd_resp_set_hdr(req, "Connection", "close"); 
     httpd_resp_send(req, NULL, 0);
-    return ESP_OK;
+    return ESP_OK; // Ignore socket drops
 }
 
 
@@ -353,7 +366,8 @@ static esp_err_t map_asset_get_handler(httpd_req_t *req) {
 static esp_err_t favicon_get_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "image/x-icon");
     const size_t favicon_size = (favicon_ico_end - favicon_ico_start);
-    return httpd_resp_send(req, (const char *)favicon_ico_start, favicon_size);
+    httpd_resp_send(req, (const char *)favicon_ico_start, favicon_size);
+    return ESP_OK; // Ignore socket drops
 }
 
 
@@ -399,6 +413,45 @@ static esp_err_t storage_api_get_handler(httpd_req_t *req) {
 }
 
 
+/**
+ * @brief Streams a raw uploaded targets file directly to the SD card.
+ */
+static esp_err_t upload_targets_post_handler(httpd_req_t *req) {
+    char filepath[128];
+    // Enforce the .csv extension on the SD card
+    snprintf(filepath, sizeof(filepath), "%s/.MAP/targets.csv", MOUNT_POINT);
+    
+    FILE *fd = fopen(filepath, "w");
+    if (!fd) {
+        ESP_LOGE(TAG, "Failed to open targets file for writing");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "File open failed");
+        return ESP_FAIL;
+    }
+
+    char buf[1024];
+    int received;
+    int remaining = req->content_len;
+
+    while (remaining > 0) {
+        int to_recv = (remaining < sizeof(buf)) ? remaining : sizeof(buf);
+        if ((received = httpd_req_recv(req, buf, to_recv)) <= 0) {
+            if (received == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            
+            fclose(fd);
+            unlink(filepath); // Delete corrupted partial file
+            return ESP_FAIL; // Silently abort without sending a 500 error to a dead socket
+        }
+        fwrite(buf, 1, received, fd);
+        remaining -= received;
+    }
+    
+    fclose(fd);
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+
+
 static void start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn = httpd_uri_match_wildcard;
@@ -424,6 +477,7 @@ static void start_webserver(void) {
         httpd_uri_t map_asset_uri = { .uri = "/map_asset*", .method = HTTP_GET, .handler = map_asset_get_handler };
         httpd_uri_t favicon_uri = { .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_get_handler };
         httpd_uri_t storage_uri = { .uri = "/api/storage", .method = HTTP_GET, .handler = storage_api_get_handler };
+        httpd_uri_t upload_targets_uri = { .uri = "/api/upload_targets", .method = HTTP_POST, .handler = upload_targets_post_handler };
         
         httpd_register_uri_handler(web_server_handle, &index_uri);
         httpd_register_uri_handler(web_server_handle, &live_uri);
@@ -434,6 +488,7 @@ static void start_webserver(void) {
         httpd_register_uri_handler(web_server_handle, &map_asset_uri);
         httpd_register_uri_handler(web_server_handle, &favicon_uri);
         httpd_register_uri_handler(web_server_handle, &storage_uri);
+        httpd_register_uri_handler(web_server_handle, &upload_targets_uri);
     }
 }
 
@@ -460,7 +515,7 @@ void wifi_manager_task(void *arg) {
             resume_tick = 0;
             if (logical_wifi_state) {
                 if (pause_tick == 0) pause_tick = current_time;
-                if ((current_time - pause_tick) >= pdMS_TO_TICKS(10000)) {
+                if ((current_time - pause_tick) >= pdMS_TO_TICKS(5000)) {
                     logical_wifi_state = false;
                     printf("((( Disabling Wi-Fi and Web Server to save battery. )))\n");
                     if (web_server_handle) { 
