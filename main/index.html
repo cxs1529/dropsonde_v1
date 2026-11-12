@@ -4,9 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NOAA/AOML Dropsonde Logger</title>
+    <!-- 
+        NOAA/AOML Dropsonde Dashboard
+        This is an offline Single Page Application (SPA) designed to run exclusively on 
+        the ESP32 web server with zero external dependencies or internet CDNs.
+    -->
     <style>
-        /* NOAA Approved Brand Colors */
         :root {
+            /* Standard NOAA Branding Guidelines */
             --noaa-dark-blue: #002868;
             --noaa-light-blue: #00A9E0;
             --noaa-gray: #e1e8f0;
@@ -19,7 +24,7 @@
         h2 { color: var(--noaa-dark-blue); border-bottom: 3px solid var(--noaa-light-blue); padding-bottom: 10px; margin-top: 0; }
         h3 { color: var(--noaa-dark-blue); margin-top: 0; }
 
-        /* Banners and Main Buttons */
+        /* General UI layout components */
         .status-banner { padding: 15px; margin-bottom: 15px; border-radius: 5px; font-size: 1.2em; font-weight: bold; text-align: center; color: #fff; transition: background-color 0.4s; }
         .bg-logging { background: var(--noaa-green); }
         .bg-paused { background: var(--noaa-red); }
@@ -28,6 +33,10 @@
         button.btn-deploy { background: var(--noaa-green); font-size: 1.1em; padding: 12px 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); border: none; border-radius: 4px; color: #fff; cursor: pointer; font-weight: bold; transition: background 0.2s;}
         button.btn-deploy:hover { background: #218838; }
 
+        /* Health Statistics Box (Smaller font indicating sensor status) */
+        .health-stats-container { display: flex; gap: 15px; margin-bottom: 15px; font-size: 0.85em; flex-wrap: wrap;}
+        .health-stat-box { flex: 1; min-width: 120px; padding: 10px; background: #fff; border-radius: 4px; border: 1px solid #ccc; text-align: center; font-weight: bold; transition: background-color 0.3s; color: var(--noaa-dark-blue); box-shadow: 0 1px 3px rgba(0,0,0,0.1);}
+
         /* Live Telemetry Box */
         .live-box { background: #fff; border-top: 5px solid var(--noaa-dark-blue); padding: 20px; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); margin-bottom: 25px; }
         .telemetry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-top: 15px; }
@@ -35,14 +44,14 @@
         .data-box .label { font-size: 0.8em; color: var(--noaa-dark-blue); font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
         .data-box .value { font-size: 1.4em; font-family: monospace; color: #111; font-weight: bold; margin-top: 8px; display: block; }
         
-        /* File Management Section */
         .table-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
         .storage-info { font-size: 0.7em; color: #555; font-weight: normal; margin-left: 10px; background: #fff; padding: 4px 10px; border-radius: 20px; border: 1px solid #ccc; display: inline-block;}
         button.btn-refresh { padding: 8px 15px; background: var(--noaa-light-blue); color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
         button.btn-refresh:hover { background: var(--noaa-dark-blue); }
 
+        /* Responsive Layout for Table and Metadata Inspector side-by-side */
         .flex-container { display: flex; flex-wrap: wrap; gap: 20px; }
-        .table-container { flex: 2; min-width: 300px; }
+        .table-container { flex: 2; min-width: 450px; }
         .summary-container { flex: 1; min-width: 250px; background: #fff; border: 1px solid #ddd; border-top: 5px solid var(--noaa-light-blue); padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); height: fit-content; position: sticky; top: 20px; }
         
         table { width: 100%; border-collapse: collapse; background: #fff; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
@@ -59,12 +68,11 @@
         .summary-label { font-size: 0.85em; color: #666; text-transform: uppercase; font-weight: bold; }
         .summary-value { font-family: monospace; font-size: 1.05em; color: var(--noaa-dark-blue); margin-top: 5px; word-break: break-all; }
 
-        /* Modal Styles */
+        /* Modal Overlay configuration */
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(2px);}
         .modal-box { background: #fff; padding: 25px; border-radius: 8px; width: 90%; max-width: 450px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
         .modal-box h3 { margin-top: 0; border-bottom: 2px solid var(--noaa-gray); padding-bottom: 10px; }
         
-        /* New Textarea Container Styles */
         .textarea-wrapper { position: relative; width: 100%; margin-bottom: 10px; }
         .textarea-wrapper textarea { width: 100%; height: 100px; padding: 10px; padding-bottom: 25px; border: 1px solid #ccc; border-radius: 4px; resize: none; font-family: inherit; box-sizing: border-box;}
         .textarea-wrapper .char-counter { position: absolute; bottom: 8px; right: 10px; font-size: 0.75em; color: #888; pointer-events: none; }
@@ -89,7 +97,17 @@
     </div>
 
     <div class="live-box">
-        <h3>Live Telemetry</h3>
+        <h3 style="margin-bottom: 15px;">Live Telemetry</h3>
+        
+        <!-- Dropsonde Health Statistics -->
+        <div class="health-stats-container">
+            <div class="health-stat-box" id="boxTemp">Temp: <span id="valS_Temp">--</span>&deg;C</div>
+            <div class="health-stat-box" id="boxRh">RH: <span id="valS_Rh">--</span>%</div>
+            <div class="health-stat-box" id="boxPress">Press: <span id="valS_Press">--</span> hPa</div>
+            <div class="health-stat-box" id="boxVolt">Volt: <span id="valS_Volt">X V</span></div>
+        </div>
+
+        <!-- GPS Telemetry Variables -->
         <div class="telemetry-grid">
             <div class="data-box"><span class="label">Date & Time (UTC)</span><span class="value" id="valTime">--/--/-- --:--:--</span></div>
             <div class="data-box"><span class="label">Latitude</span><span class="value" id="valLat">--.------</span></div>
@@ -99,7 +117,7 @@
         </div>
     </div>
 
-    <!-- Table Header Row with Storage Metrics -->
+    <!-- Table Header Row with Dynamic Storage Metrics -->
     <div class="table-header-row">
         <h3 style="display: flex; align-items: center; margin: 0;">
             Internal Storage 
@@ -112,7 +130,7 @@
     <div class="flex-container">
         <div class="table-container">
             <table id="fileTable">
-                <tr><th>File Name</th><th>Size</th><th>Actions</th></tr>
+                <tr><th>Deployment</th><th>Size</th><th>GPS Data</th><th>Sensor Data</th></tr>
             </table>
         </div>
         
@@ -122,7 +140,7 @@
         </div>
     </div>
 
-    <!-- Deployment Note Modal -->
+    <!-- Deployment Note Modal (Triggers on new file generation) -->
     <div id="noteModal" class="modal-overlay">
         <div class="modal-box">
             <h3>New Deployment</h3>
@@ -149,6 +167,9 @@
         let countdownInterval;
         let countdownSeconds = 60;
 
+        /**
+         * @brief Formats raw bytes dynamically into human readable strings.
+         */
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
             const k = 1024;
@@ -157,6 +178,9 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
+        /**
+         * @brief Injects the clicked deployment's metadata dynamically into the sidebar panel.
+         */
         function showSummary(fileName) {
             let d = fileDataMap[fileName];
             if(!d) return;
@@ -187,6 +211,9 @@
             `;
         }
 
+        /**
+         * @brief Queries the ESP32 for total available FAT32 clusters.
+         */
         function updateStorageMetrics() {
             document.getElementById('storageMetrics').innerText = "Calculating storage...";
             document.getElementById('storageMetrics').style.color = "#888";
@@ -211,6 +238,10 @@
             });
         }
 
+        /**
+         * @brief Builds the core file list table by requesting the array from the C web_server.c endpoint.
+         * The backend automatically clusters BMEDATA onto the same row as GPSDATA.
+         */
         function loadFiles() {
             updateStorageMetrics();
 
@@ -224,16 +255,24 @@
                 });
 
                 fileDataMap = {};
-                let html = '<tr><th>File Name</th><th>Size</th><th>Actions</th></tr>';
+                let html = '<tr><th>Deployment</th><th>Size</th><th>GPS Data</th><th>Sensor Data</th></tr>';
                 
                 data.forEach(f => {
                     fileDataMap[f.name] = f;
+                    let bmeName = f.name.replace("GPSDATA", "BMEDATA");
+                    
                     html += `<tr class="file-row" onclick="showSummary('${f.name}')">
-                    <td>${f.name}</td><td>${(f.size / 1024).toFixed(1)} KB</td><td>
-                    <a href="/map_asset?file=viewer.html&data=${f.name}" target="_blank" style="color:var(--noaa-dark-blue);" onclick="event.stopPropagation()">Map</a> | 
-                    <a href="/view?file=${f.name}" target="_blank" style="color:var(--noaa-green);" onclick="event.stopPropagation()">Read</a> | 
-                    <a href="/download?file=${f.name}" download="${f.name}" onclick="event.stopPropagation()">Download</a> | 
-                    <a href="#" id="del-${f.name}" onclick="deleteFile('${f.name}', event)" style="color:var(--noaa-red);">Delete</a></td></tr>`;
+                    <td>${f.name}</td><td>${(f.size / 1024).toFixed(1)} KB</td>
+                    <td>
+                        <a href="/map_asset?file=viewer.html&data=${f.name}" target="_blank" style="color:var(--noaa-dark-blue);" onclick="event.stopPropagation()">Map</a> | 
+                        <a href="/view?file=${f.name}" target="_blank" style="color:var(--noaa-green);" onclick="event.stopPropagation()">Read</a> | 
+                        <a href="/download?file=${f.name}" download="${f.name}" onclick="event.stopPropagation()">DL</a> | 
+                        <a href="#" id="del-${f.name}" onclick="deleteFile('${f.name}', event)" style="color:var(--noaa-red);">Del</a>
+                    </td>
+                    <td>
+                        <a href="/download?file=${bmeName}" download="${bmeName}" onclick="event.stopPropagation()">DL</a> | 
+                        <a href="/map_asset?file=plot.html&data=${bmeName}" target="_blank" style="color:var(--noaa-dark-blue);" onclick="event.stopPropagation()">Plot</a>
+                    </td></tr>`;
                 });
                 
                 document.getElementById('fileTable').innerHTML = html;
@@ -243,13 +282,13 @@
                 } else {
                     document.getElementById('summaryPanel').innerHTML = `
                         <h3 style="color:var(--noaa-dark-blue);">File Metadata</h3>
-                        <p style="color:#666;">No valid .txt files found in DATA directory.</p>
+                        <p style="color:#666;">No valid .dat files found in DATA directory.</p>
                     `;
                 }
             }).catch(e => console.error("Error fetching file list: ", e));
         }
 
-        // --- Note Modal & Timer Logic ---
+        // --- Timeout & Modal Logic ---
         function triggerNewDeployment() {
             document.getElementById('noteModal').style.display = 'flex';
             let ta = document.getElementById('deployNote');
@@ -257,7 +296,7 @@
             document.getElementById('charCount').innerText = '0 / 255';
             document.getElementById('timeoutWarning').style.display = 'none';
             ta.focus();
-            resetTimers(); // Start idle timer immediately upon opening
+            resetTimers();
         }
 
         function closeNoteModal() {
@@ -271,12 +310,12 @@
             resetTimers();
         });
 
+        // Auto-save logic preventing the device from freezing if the operator walks away mid-typing
         function resetTimers() {
             clearTimeout(typingTimer);
             clearInterval(countdownInterval);
             document.getElementById('timeoutWarning').style.display = 'none';
             
-            // Wait 5 seconds after typing stops to begin the 60s countdown
             typingTimer = setTimeout(() => {
                 countdownSeconds = 60;
                 let warningEl = document.getElementById('timeoutWarning');
@@ -299,7 +338,6 @@
             let note = document.getElementById('deployNote').value.trim();
             if (!note) note = "N/A";
             
-            // Send note via query parameter to the backend
             fetch('/api/manage?action=new_file&note=' + encodeURIComponent(note), {method: 'POST'})
             .then(response => {
                 if (response.ok) {
@@ -313,7 +351,7 @@
 
         function deleteFile(name, event) {
             event.stopPropagation();
-            if(confirm('Permanently delete ' + name + '?')) {
+            if(confirm('Permanently delete ' + name + ' (and associated BMEDATA file)?')) {
                 fetch('/api/manage?action=delete&file=' + name, {method:'POST'}).then(response => {
                     if (response.ok) loadFiles();
                     else alert("Error: Cannot delete the active file while it is mounted.");
@@ -326,25 +364,18 @@
             const file = fileInput.files[0];
             if (!file) return;
 
-            // Enforce CSV extension client-side
+            // Restrict bad uploads client-side
             if (!file.name.toLowerCase().endsWith('.csv')) {
                 alert("Please select a valid targets.csv file.");
                 fileInput.value = ""; 
                 return;
             }
 
-            // Send the raw file blob directly to avoid multipart/form-data parsing in C
-            fetch('/api/upload_targets', {
-                method: 'POST',
-                body: file
-            })
+            fetch('/api/upload_targets', { method: 'POST', body: file })
             .then(response => {
-                if (response.ok) {
-                    alert("Map targets updated successfully!");
-                } else {
-                    alert("Failed to update targets.");
-                }
-                fileInput.value = ""; // Reset input
+                if (response.ok) alert("Map targets updated successfully!");
+                else alert("Failed to update targets.");
+                fileInput.value = ""; 
             })
             .catch(e => {
                 alert("Upload error: " + e);
@@ -352,6 +383,8 @@
             });
         }
 
+        // --- Fast Polling Live Data ---
+        // Runs every 500ms to mimic real-time reactivity without websockets
         setInterval(() => {
             fetch('/api/live').then(r => r.json()).then(d => {
                 document.getElementById('valTime').innerText = `${d.date} ${d.time}`;
@@ -359,6 +392,33 @@
                 document.getElementById('valLon').innerText = d.lon;
                 document.getElementById('valPdop').innerText = d.pdop;
                 document.getElementById('valFix').innerText = d.fix;
+                
+                // Color Logic for Health Stats (Evaluated dynamically)
+                let t = parseFloat(d.temp);
+                let h = parseFloat(d.rh);
+                let p = parseFloat(d.press);
+                
+                let tColor = '#fff';
+                if(t < 15) tColor = '#add8e6';
+                else if(t >= 30 && t <= 35) tColor = '#ffcc80';
+                else if(t > 40) tColor = '#ff9999';
+                
+                let hColor = '#fff';
+                if(h >= 65 && h <= 85) hColor = '#ffcc80';
+                else if(h > 85) hColor = '#ff9999';
+                
+                let pColor = '#fff';
+                if(p > 850) pColor = '#ff9999';
+                else if(p > 700) pColor = '#ffcc80';
+                
+                document.getElementById('boxTemp').style.backgroundColor = tColor;
+                document.getElementById('boxRh').style.backgroundColor = hColor;
+                document.getElementById('boxPress').style.backgroundColor = pColor;
+                
+                document.getElementById('valS_Temp').innerText = d.temp;
+                document.getElementById('valS_Rh').innerText = d.rh;
+                document.getElementById('valS_Press').innerText = d.press;
+                document.getElementById('valS_Volt').innerText = d.volt; 
                 
                 let banner = document.getElementById('statusBanner');
                 if(d.logging) {
@@ -369,6 +429,7 @@
                     banner.innerText = 'STATUS: PAUSED - Storage Halted';
                 }
 
+                // Prevent users from deleting the file that is currently locked by the SD writer
                 Object.values(fileDataMap).forEach(f => {
                     let delBtn = document.getElementById('del-' + f.name);
                     if (delBtn) {
@@ -379,7 +440,7 @@
                         } else {
                             delBtn.style.color = 'var(--noaa-red)';
                             delBtn.style.pointerEvents = 'auto';
-                            delBtn.innerText = 'Delete';
+                            delBtn.innerText = 'Del';
                         }
                     }
                 });
@@ -389,28 +450,20 @@
         window.onload = loadFiles;
     </script>
 
-    <!-- Map Targets -->
+    <!-- Map Targets Configuration Bottom Section -->
     <div style="margin-top: 25px; padding: 20px; background: #fff; border-top: 5px solid var(--noaa-dark-blue); border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); text-align: center;">
         <h3 style="color: var(--noaa-dark-blue); margin-top: 0; margin-bottom: 15px;">Map Targets</h3>
-        
         <div style="display: flex; justify-content: center; gap: 15px;">
-            <!-- Download Button -->
             <a href="/map_asset?file=targets.csv" download="targets.csv" style="background: var(--noaa-light-blue); padding: 10px 18px; color: #fff; border-radius: 4px; text-decoration: none; font-weight: bold; transition: background 0.2s;">Download</a>
-            
-            <!-- Hidden File Input -->
             <input type="file" id="targetFileInput" accept=".csv" style="display: none;" onchange="uploadTargetsFile()">
-            
-            <!-- Upload Button -->
             <button onclick="document.getElementById('targetFileInput').click()" style="background: var(--noaa-dark-blue); padding: 10px 18px; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s;">Upload</button>
         </div>
     </div>
 
-    <!-- Dropsonde Plan and Instructions -->
+    <!-- Official PDF Plan Route -->
     <div style="margin-top: 25px; margin-bottom: 40px; text-align: center;">
         <a href="/map_asset?file=plan.html" target="_blank" style="display: inline-block; background: var(--noaa-green); padding: 12px 24px; color: #fff; border-radius: 4px; text-decoration: none; font-weight: bold; font-size: 1.1em; box-shadow: 0 4px 6px rgba(0,0,0,0.15); transition: background 0.2s;">Dropsonde Plan and Instructions</a>
     </div>
-
-
 
 </body>
 </html>

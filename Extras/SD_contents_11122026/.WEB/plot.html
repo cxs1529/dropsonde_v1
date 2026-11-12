@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dropsonde Sensor Telemetry</title>
+    <!-- 
+        uPlot Library Integration 
+        The lightest and fastest time-series plotter available (~15KB).
+        Must be loaded locally from the ESP32 SD card for offline, captive-portal functionality.
+    -->
+    <link rel="stylesheet" href="/map_asset?file=uPlot.min.css">
+    <script src="/map_asset?file=uPlot.iife.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f4f6f9; color: #333; }
+        h2 { color: #002868; border-bottom: 3px solid #00A9E0; padding-bottom: 10px; margin-top: 0; }
+        .chart-container { background: #fff; padding: 20px; margin-bottom: 25px; border-radius: 6px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); width: 100%; box-sizing: border-box; }
+        .stats-bar { display: flex; justify-content: space-between; font-size: 0.9em; color: #555; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+        .stats-bar b { color: #002868; font-size: 1.1em; }
+        .stat-badge { background: #f0f0f0; padding: 4px 10px; border-radius: 4px; font-weight: bold; margin-left: 8px;}
+        
+        /* Auto-hide tooltips dynamically via uPlot */
+        .uplot { border: 1px solid #eee; border-radius: 4px; overflow: hidden; }
+    </style>
+</head>
+<body>
+    <h2 id="title">Loading Sensor Data...</h2>
+
+    <div class="chart-container">
+        <div class="stats-bar" id="statTemp"><b>Temperature (&deg;C)</b> <span id="valTemp">Loading...</span></div>
+        <div id="tempChart"></div>
+    </div>
+
+    <div class="chart-container">
+        <div class="stats-bar" id="statRh"><b>Relative Humidity (%)</b> <span id="valRh">Loading...</span></div>
+        <div id="rhChart"></div>
+    </div>
+
+    <div class="chart-container">
+        <div class="stats-bar" id="statPress"><b>Pressure (hPa)</b> <span id="valPress">Loading...</span></div>
+        <div id="pressChart"></div>
+    </div>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const dataFile = urlParams.get('data');
+
+        /**
+         * @brief Converts the NOAA CSV timestamp into a Unix Epoch timestamp (seconds).
+         * uPlot natively requires Unix seconds for its x-axis auto-scaling to work.
+         */
+        function parseTimestampToUnix(dateStr) {
+            // Standard format: "11/02/26 12:17:51" (MM/DD/YY HH:MM:SS)
+            let parts = dateStr.trim().split(' ');
+            if(parts.length < 2) return 0;
+            
+            let dateParts = parts[0].split('/');
+            let timeParts = parts[1].split(':');
+            
+            // Reconstruct absolute date (assume 2000 + YY)
+            let d = new Date(Date.UTC(2000 + parseInt(dateParts[2]), parseInt(dateParts[0]) - 1, parseInt(dateParts[1]),
+                                      parseInt(timeParts[0]), parseInt(timeParts[1]), parseInt(timeParts[2])));
+            return d.getTime() / 1000;
+        }
+
+        if (dataFile) {
+            document.getElementById('title').innerText = "Telemetry: " + dataFile;
+            
+            // Request the underlying CSV file using the exact endpoint created in web_server.c
+            fetch('/view?file=' + dataFile)
+                .then(r => r.text())
+                .then(csv => {
+                    let lines = csv.split('\n');
+                    
+                    let timeArr = [];
+                    let temps = [];
+                    let rhs = [];
+                    let presses = [];
+                    
+                    // Parse CSV rows, deliberately skipping the header string (i=1)
+                    for (let i = 1; i < lines.length; i++) {
+                        let lineTrimmed = lines[i].trim();
+                        if (lineTrimmed === '') continue; // Skip trailing blank lines
+                        
+                        let parts = lineTrimmed.split(',');
+                        if (parts.length >= 4) {
+                            let unixSec = parseTimestampToUnix(parts[0]);
+                            if (unixSec > 0) {
+                                timeArr.push(unixSec);
+                                temps.push(parseFloat(parts[1]));
+                                rhs.push(parseFloat(parts[2]));
+                                presses.push(parseFloat(parts[3]));
+                            }
+                        }
+                    }
+
+                    if (temps.length > 0) {
+                        // Plot the three independent charts using uPlot's fast Canvas renderer
+                        renderUplotChart('tempChart', 'valTemp', 'Temperature', timeArr, temps, '#D13944');
+                        renderUplotChart('rhChart', 'valRh', 'Relative Humidity', timeArr, rhs, '#00A9E0');
+                        renderUplotChart('pressChart', 'valPress', 'Pressure', timeArr, presses, '#28a745');
+                    } else {
+                        document.getElementById('title').innerText = "Telemetry: " + dataFile + " (No Valid Data Rows Found)";
+                    }
+                })
+                .catch(e => {
+                    document.getElementById('title').innerText = "Failed to load: " + dataFile;
+                    console.error(e);
+                });
+        }
+
+        /**
+         * @brief Wraps the uPlot instantiation and mathematical stats calculations into a reusable block.
+         */
+        function renderUplotChart(containerId, statId, label, xData, yData, strokeColor) {
+            let validData = yData.filter(v => !isNaN(v));
+            if (validData.length === 0) return;
+            
+            // 1. Calculate and update Top Bar Statistics (Min, Max, Avg)
+            let min = Math.min(...validData);
+            let max = Math.max(...validData);
+            let avg = (validData.reduce((a,b) => a + b, 0) / validData.length).toFixed(2);
+            
+            document.getElementById(statId).innerHTML = `
+                <span class="stat-badge">Min: ${min.toFixed(2)}</span> 
+                <span class="stat-badge">Max: ${max.toFixed(2)}</span> 
+                <span class="stat-badge">Avg: ${avg}</span>
+            `;
+            
+            // Calculate a 10% vertical padding buffer to prevent the line from hitting the top/bottom canvas edge
+            if(min === max) { min -= 1; max += 1; }
+            let pad = (max - min) * 0.1;
+            let yMin = min - pad; 
+            let yMax = max + pad;
+
+            // 2. Define the uPlot Options Layout
+            const opts = {
+                title: label,
+                width: document.getElementById(containerId).clientWidth, // Auto-size to container
+                height: 250,
+                cursor: {
+                    drag: { setScale: true, x: true, y: false } // Allow horizontal zooming by dragging
+                },
+                scales: {
+                    x: { time: true },
+                    y: { auto: false, range: [yMin, yMax] } // Use the calculated padded boundaries
+                },
+                series: [
+                    {}, // X-axis (Time) automatically uses the first array
+                    {
+                        label: label,
+                        stroke: strokeColor,
+                        width: 2, // Line thickness
+                        points: { show: false } // Hide points for speed unless hovered
+                    }
+                ],
+                axes: [
+                    {}, // X-axis (Default formatting)
+                    {
+                        grid: { stroke: "#eee", width: 1 } // Light horizontal guidelines
+                    }
+                ]
+            };
+
+            // 3. Render Chart
+            // uPlot requires a specific nested array layout: [ [x_values], [y_values] ]
+            let data = [ xData, yData ];
+            let uplotInstance = new uPlot(opts, data, document.getElementById(containerId));
+            
+            // 4. Force Responsive Resize via Window Listener
+            window.addEventListener("resize", e => {
+                uplotInstance.setSize({
+                    width: document.getElementById(containerId).clientWidth,
+                    height: 250
+                });
+            });
+        }
+    </script>
+</body>
+</html>

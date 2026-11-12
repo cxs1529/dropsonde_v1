@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dropsonde Track Viewer</title>
+    <link rel="stylesheet" href="/map_asset?file=leaflet.css" />
+    <script src="/map_asset?file=leaflet.js"></script>
+    <style>
+        html, body { height: 100%; width: 100%; margin: 0; padding: 0; font-family: sans-serif; }
+        #map, .leaflet-container { height: 100%; width: 100%; background-color: #ffffff !important; }
+        
+        .depth-label {
+            color: #000000; font-size: 13px; font-weight: 900; text-align: center;
+            text-shadow: 2px 2px 0px #fff, -2px -2px 0px #fff, 2px -2px 0px #fff, -2px 2px 0px #fff, 0px 2px 0px #fff, 0px -2px 0px #fff, 2px 0px 0px #fff, -2px 0px 0px #fff;
+            background: transparent; border: none; display: none; 
+        }
+        .zoom-high .depth-label { display: block; } 
+        .zoom-med .label-major { display: block; }  
+        .zoom-low .label-critical { display: block; } 
+        
+        .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+            background: rgba(255, 255, 255, 0.85) !important; backdrop-filter: blur(2px);
+            box-shadow: 0 3px 14px rgba(0,0,0,0.3); color: #000;
+        }
+        .leaflet-popup-content { margin: 10px; }
+        
+        .map-controls-panel {
+            background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(2px); padding: 6px 10px;
+            border-radius: 4px; border: 1px solid #999; box-shadow: 0 1px 5px rgba(0,0,0,0.3);
+            font-size: 12px; font-weight: bold; color: #222; display: flex; flex-direction: column; gap: 6px; user-select: none;
+        }
+        .map-controls-panel label { cursor: pointer; display: flex; align-items: center; gap: 6px; }
+        
+        .station-name-label {
+            color: #000000; font-size: 11px; font-weight: 800; white-space: nowrap;
+            text-shadow: 1.5px 1.5px 0px #fff, -1.5px -1.5px 0px #fff, 1.5px -1.5px 0px #fff, -1.5px 1.5px 0px #fff;
+            background: transparent; border: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            var map = L.map('map', { renderer: L.canvas() }).setView([27.0, -79.0], 7);
+            
+            var contourLayer = null; 
+            var stationLayerGroup = L.layerGroup().addTo(map);
+            var trackLayer = L.layerGroup().addTo(map);
+            
+            var stationDataCache = []; 
+            var depthPoints = []; 
+            var placedLabels = [];
+            var minDistance = 1000; 
+
+            var showMeasuring = true;
+            var showStations = true;
+            var lastClickLatLng = null;
+            var measurementLine = L.polyline([], {color: '#FF00FF', weight: 3, dashArray: '6, 6', interactive: false}).addTo(map);
+
+            const urlParams = new URLSearchParams(window.location.search);
+            const dataFile = urlParams.get('data');
+            if (dataFile) document.title = "Map: " + dataFile;
+
+            // --- Math Helpers ---
+            function toRad(degrees) { return degrees * Math.PI / 180; }
+            function calcDistanceMeters(lat1, lon1, lat2, lon2) {
+                const R = 6371e3; 
+                const p1 = toRad(lat1), p2 = toRad(lat2);
+                const dp = toRad(lat2 - lat1), dl = toRad(lon2 - lon1);
+                const a = Math.sin(dp/2) * Math.sin(dp/2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
+                return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            }
+            function getHeading(lat1, lng1, lat2, lng2) {
+                var dLng = toRad(lng2 - lng1);
+                lat1 = toRad(lat1); lat2 = toRad(lat2);
+                var y = Math.sin(dLng) * Math.cos(lat2);
+                var x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+                var brng = Math.atan2(y, x) * 180 / Math.PI;
+                return (brng + 360) % 360;
+            }
+
+            window.resetMeasurement = function() {
+                lastClickLatLng = null;
+                measurementLine.setLatLngs([]);
+                map.closePopup();
+            };
+
+            // --- UI Controls ---
+            var MultiControl = L.Control.extend({
+                options: { position: 'topright' },
+                onAdd: function(map) {
+                    var container = L.DomUtil.create('div', 'map-controls-panel');
+                    container.innerHTML = 
+                        '<label><input type="checkbox" id="chk-stations" checked> <b>Stations</b></label>' +
+                        '<label><input type="checkbox" id="chk-measure" checked> <b>Measure Tool</b></label>';
+                    
+                    L.DomEvent.disableClickPropagation(container);
+                    L.DomEvent.disableScrollPropagation(container);
+
+                    container.querySelector('#chk-stations').addEventListener('change', function(e) {
+                        showStations = e.target.checked;
+                        renderStations();
+                    });
+                    container.querySelector('#chk-measure').addEventListener('change', function(e) {
+                        showMeasuring = e.target.checked;
+                        if (!showMeasuring) window.resetMeasurement();
+                    });
+                    return container;
+                }
+            });
+            map.addControl(new MultiControl());
+
+            // --- Dynamic Map Zoom Rules ---
+            map.on('zoomend', function() {
+                var z = map.getZoom();
+                if (z >= 10) map.getContainer().className = "zoom-high";
+                else if (z >= 8) map.getContainer().className = "zoom-med";
+                else map.getContainer().className = "zoom-low";
+                
+                if (contourLayer) {
+                    contourLayer.setStyle(function(feature) {
+                        var depth = feature.properties.ELEV !== undefined ? Math.abs(feature.properties.ELEV) : 0;
+                        var baseWeight = (depth === 0) ? 4.5 : 2.5;
+                        var dynamicWeight = z >= 10 ? baseWeight : (z >= 8 ? baseWeight * 0.6 : baseWeight * 0.3);
+                        return { weight: dynamicWeight };
+                    });
+                }
+                renderStations();
+            });
+
+            // --- Map Click Logic (Measurement & Depth) ---
+            var popup = L.popup({closeOnClick: false}); 
+            map.on('click', function(e) {
+                var clickLat = e.latlng.lat, clickLng = e.latlng.lng;
+                var closestDepth = 'Unknown', minDistSq = Infinity;
+                var cosLat = Math.cos(clickLat * Math.PI / 180);
+
+                for (var i = 0; i < depthPoints.length; i++) {
+                    var dLat = depthPoints[i][0] - clickLat;
+                    var dLng = (depthPoints[i][1] - clickLng) * cosLat;
+                    var distSq = (dLat * dLat) + (dLng * dLng);
+                    if (distSq < minDistSq) { minDistSq = distSq; closestDepth = depthPoints[i][2]; }
+                }
+                
+                var ns = clickLat >= 0 ? 'N' : 'S', ew = clickLng >= 0 ? 'E' : 'W';
+                var distanceHtml = "";
+                
+                if (showMeasuring) {
+                    if (lastClickLatLng) {
+                        var distMeters = map.distance(lastClickLatLng, e.latlng);
+                        var distNM = distMeters / 1852.0, distKM = distMeters / 1000.0;
+                        var heading = getHeading(lastClickLatLng.lat, lastClickLatLng.lng, clickLat, clickLng);
+                        distanceHtml = "<hr style='margin: 6px 0; border: 0; border-top: 1px solid rgba(0,0,0,0.3);'>" +
+                                       "<b style='font-size: 10px;'>Dist & Heading</b><br>" + 
+                                       "<span style='font-size: 12px; color: #FF00FF;'><b>" + distNM.toFixed(2) + " NM (" + distKM.toFixed(2) + " KM)</b></span><br>" +
+                                       "<span style='font-size: 12px; color: #333;'><b>" + heading.toFixed(1) + "&deg;</b></span><br>" +
+                                       "<a href='#' onclick='window.resetMeasurement(); return false;' style='display:inline-block; margin-top:4px; color:#d9534f; text-decoration:none; font-weight:bold; font-size: 10px;'>[ Reset Path ]</a>";
+                        measurementLine.setLatLngs([lastClickLatLng, e.latlng]);
+                    } else {
+                        distanceHtml = "<hr style='margin: 6px 0; border: 0; border-top: 1px solid rgba(0,0,0,0.3);'><span style='font-size: 10px; color: #333;'><i>Tap another spot to measure</i></span>";
+                    }
+                    lastClickLatLng = e.latlng;
+                }
+                
+                var content = "<div style='text-align:center; font-family:sans-serif; margin: 0px;'>" +
+                              "<b style='font-size: 10px;'>GPS Coordinates</b><br>" + 
+                              "<span style='font-size: 12px; font-weight: bold;'>" + Math.abs(clickLat).toFixed(5) + "&deg; " + ns + "<br>" + Math.abs(clickLng).toFixed(5) + "&deg; " + ew + "</span>" +
+                              "<hr style='margin: 6px 0; border: 0; border-top: 1px solid rgba(0,0,0,0.3);'>" +
+                              "<b style='font-size: 10px;'>Closest Depth</b><br>" + 
+                              "<span style='font-size: 13.5px; color: #000;'><b>" + closestDepth + " m</b></span>" + distanceHtml + "</div>";
+                
+                popup.setLatLng(e.latlng).setContent(content).openOn(map);
+            });
+
+            // --- Load Stations ---
+            function renderStations() {
+                stationLayerGroup.clearLayers();
+                if (!showStations || stationDataCache.length === 0) return;
+                var zoomScale = Math.max(0.4, (map.getZoom() / 8.0));
+                stationDataCache.forEach(function(st) {
+                    var r = Math.max(3, (st.size * 1.5) * zoomScale);
+                    L.circleMarker([st.lat, st.lon], { radius: r, fillColor: st.color, color: '#000', weight: 2, fillOpacity: 0.9, interactive: true })
+                        .bindPopup(`<div style='text-align:center; font-family:sans-serif;'><b style='font-size:14px; color:${st.color};'>${st.name}</b><br><span style='font-size:11px;'>Lat: ${st.lat.toFixed(5)}</span><br><span style='font-size:11px;'>Lon: ${st.lon.toFixed(5)}</span></div>`)
+                        .addTo(stationLayerGroup);
+                    L.marker([st.lat, st.lon], { icon: L.divIcon({ className: 'station-name-label', html: st.name, iconSize: [80, 16], iconAnchor: [40, -(r + 4)] }), interactive: false }).addTo(stationLayerGroup);
+                });
+            }
+
+            // --- Load Stations (Resilient CSV Parser) ---
+            fetch('/map_asset?file=targets.csv').then(r => {
+                if (!r.ok) throw new Error("Targets file not found on server.");
+                return r.text();
+            }).then(text => {
+                try {
+                    text.split('\n').forEach((line, index) => {
+                        let lineTrimmed = line.trim();
+                        // Ignore empty lines, comments, or malformed short lines
+                        if (lineTrimmed === '' || lineTrimmed.startsWith('#')) return; 
+                        
+                        let p = lineTrimmed.split(',');
+                        if (p.length >= 5) {
+                            let lat = parseFloat(p[1].trim());
+                            let lon = parseFloat(p[2].trim());
+                            let size = parseFloat(p[4].trim());
+                            
+                            // Guard against NaN resulting from bad CSV text inputs
+                            if (!isNaN(lat) && !isNaN(lon) && !isNaN(size)) {
+                                stationDataCache.push({ 
+                                    name: p[0].trim(), 
+                                    lat: lat, 
+                                    lon: lon, 
+                                    color: p[3].trim(), 
+                                    size: size 
+                                });
+                            } else {
+                                console.warn(`Skipping line ${index + 1}: Invalid coordinate or size number.`);
+                            }
+                        } else {
+                            console.warn(`Skipping line ${index + 1}: Insufficient CSV columns.`);
+                        }
+                    });
+                    renderStations();
+                } catch (parseError) {
+                    console.error("Critical error parsing targets.csv:", parseError);
+                }
+            }).catch(e => console.warn("Stations not loaded:", e.message));
+
+            
+            // --- Load GeoJSON Isobaths ---
+            function getDepthColor(depth) {
+                if (depth >= 1000) return '#000'; if (depth >= 950) return '#00008B'; if (depth >= 900) return '#0000CD'; if (depth >= 850) return '#0000FF';  
+                if (depth >= 800) return '#483D8B'; if (depth >= 750) return '#4B0082'; if (depth >= 700) return '#800080'; if (depth >= 650) return '#8B008B';  
+                if (depth >= 600) return '#FF1493'; if (depth >= 550) return '#C71585'; if (depth >= 500) return '#DC143C'; if (depth >= 450) return '#FF0000';  
+                if (depth >= 400) return '#FF4500'; if (depth >= 350) return '#FF8C00'; if (depth >= 300) return '#D2691E'; if (depth >= 250) return '#B8860B';  
+                if (depth >= 200) return '#556B2F'; if (depth >= 150) return '#228B22'; if (depth >= 100) return '#008000'; if (depth >= 50)  return '#008B8B';  
+                return '#00CED1';                    
+            }
+
+            fetch('/map_asset?file=27n-50c005t.geojson').then(r => r.json()).then(data => {
+                contourLayer = L.geoJSON(data, {
+                    style: function (f) {
+                        var depth = f.properties.ELEV !== undefined ? Math.abs(f.properties.ELEV) : 0;
+                        var z = map.getZoom();
+                        var baseWeight = (depth === 0) ? 4.5 : 2.5;
+                        return { color: (depth === 0) ? '#5C4033' : getDepthColor(depth), weight: z >= 10 ? baseWeight : (z >= 8 ? baseWeight * 0.6 : baseWeight * 0.3), opacity: 1.0, fill: false };
+                    },
+                    onEachFeature: function(f, layer) {
+                        if (f.properties && f.properties.ELEV !== undefined) {
+                            var depth = Math.abs(f.properties.ELEV);
+                            var impClass = depth % 200 === 0 ? 'label-critical' : (depth % 100 === 0 ? 'label-major' : '');
+
+                            function processLine(lineCoords) {
+                                for (var i = 0; i < lineCoords.length; i++) depthPoints.push([lineCoords[i][1], lineCoords[i][0], depth]);
+                                if (lineCoords.length < 10) return; 
+                                var labelsCount = Math.max(1, Math.floor(lineCoords.length / 100)); 
+                                var step = Math.floor(lineCoords.length / (labelsCount + 1));
+                                for (var i = 1; i <= labelsCount; i++) {
+                                    var idx = i * step;
+                                    if (idx >= lineCoords.length) break;
+                                    var ll = [lineCoords[idx][1], lineCoords[idx][0]];
+                                    var tooClose = placedLabels.some(pl => map.distance(ll, pl) < minDistance);
+                                    if (!tooClose) {
+                                        L.marker(ll, { icon: L.divIcon({ className: 'depth-label ' + impClass, html: depth, iconSize: [40, 20], iconAnchor: [20, 10] }), interactive: false }).addTo(map);
+                                        placedLabels.push(ll); 
+                                    }
+                                }
+                            }
+                            if (f.geometry.type === 'MultiLineString') f.geometry.coordinates.forEach(processLine);
+                            else if (f.geometry.type === 'LineString') processLine(f.geometry.coordinates);
+                        }
+                    }
+                }).addTo(map);
+                if (!dataFile) { map.fitBounds(contourLayer.getBounds()); }
+                map.fire('zoomend');
+            }).catch(e => console.error("Error loading GeoJSON:", e));
+
+            // --- Load Track Data ---
+            function parseNMEACoord(str) {
+                if (!str || str.trim() === '') return 0;
+                let parts = str.trim().split(' ');
+                let deg = parseFloat(parts[0]);
+                let minDir = parts[1];
+                let dir = minDir.slice(-1);
+                let min = parseFloat(minDir.slice(0, -1));
+                let decimal = deg + (min / 60.0);
+                return (dir === 'S' || dir === 'W') ? -decimal : decimal;
+            }
+
+            if (dataFile) {
+                fetch('/view?file=' + dataFile)
+                    .then(res => res.text())
+                    .then(text => {
+                        let lines = text.split('\n');
+                        let validPositions = [];
+                        let lastPoint = null;
+                        let lastTime = null;
+
+                        for (let i = 0; i < lines.length; i++) {
+                            let line = lines[i];
+                            let parts = line.trim().split(/\s{2,}/); 
+                            
+                            if (parts.length >= 5 && !line.startsWith("P=") && (line.includes("TYPE: 2") || line.includes("TYPE: 3"))) {
+                                let [m, d, y] = parts[0].split('/');
+                                let [hr, min, sec] = parts[1].split(':');
+                                let currentTime = new Date(Date.UTC(2000 + parseInt(y), parseInt(m)-1, parseInt(d), parseInt(hr), parseInt(min), parseInt(sec)));
+                                
+                                let lat = parseNMEACoord(parts[2]);
+                                let lon = parseNMEACoord(parts[3]);
+                                let fixStr = parts[4]; 
+                                
+                                if (lat === 0 && lon === 0) continue; 
+
+                                let speedText = "N/A";
+                                let headingText = "N/A";
+
+                                if (lastPoint && lastTime) {
+                                    let timeDiffSec = (currentTime - lastTime) / 1000;
+                                    if (timeDiffSec > 0 && timeDiffSec <= 1800) {
+                                        let distMeters = calcDistanceMeters(lastPoint.lat, lastPoint.lon, lat, lon);
+                                        let speedMs = distMeters / timeDiffSec;
+                                        speedText = `${(speedMs * 1.94384).toFixed(2)} kts`;
+                                        headingText = `${getHeading(lastPoint.lat, lastPoint.lon, lat, lon).toFixed(0)}&deg;`;
+                                    } else if (timeDiffSec > 1800) {
+                                        speedText = "N/A (>30m gap)";
+                                    }
+                                }
+
+                                let tooltipHtml = `<div style="font-family: sans-serif;">
+                                    <b>Time (UTC):</b> ${parts[0]} ${parts[1]}<br>
+                                    <b>Pos:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}<br>
+                                    <b>Drift:</b> ${speedText} @ ${headingText}<br>
+                                    <b>Lock:</b> ${fixStr}
+                                </div>`;
+
+                                L.circleMarker([lat, lon], {
+                                    radius: 3.5, 
+                                    fillColor: line.includes("TYPE: 3") ? '#28a745' : '#ffc107', 
+                                    color: '#000', weight: 1, fillOpacity: 1
+                                }).bindTooltip(tooltipHtml).addTo(trackLayer);
+
+                                validPositions.push([lat, lon]);
+                                lastPoint = { lat: lat, lon: lon };
+                                lastTime = currentTime;
+                            }
+                        }
+
+                        if (validPositions.length > 0) {
+                            L.polyline(validPositions, { color: '#000', weight: 1, opacity: 0.5 }).addTo(trackLayer);
+                            map.fitBounds(L.polyline(validPositions).getBounds());
+                        } else {
+                            alert("No valid geographical fixes were found in this file to plot on the map.");
+                        }
+                    }).catch(e => {
+                        console.error("Error reading data file:", e);
+                        alert("Could not load the specified log file.");
+                    });
+            }
+        });
+    </script>
+</body>
+</html>
