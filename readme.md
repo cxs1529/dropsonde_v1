@@ -102,3 +102,7 @@ Included in the `Extras` directory are tools for testing and visualization:
 
 ### Surface velocity estimates
 <img width="580" height="209" alt="gps-markers-drift-speed" src="https://github.com/user-attachments/assets/9c6d87e2-1ec0-4c50-9740-ed4dd44994b5" />
+
+### Hardware
+<img width="1195" height="896" alt="dropsonde_system" src="https://github.com/user-attachments/assets/89ad80ec-9f72-4ac8-b827-a001164237ba" />
+
