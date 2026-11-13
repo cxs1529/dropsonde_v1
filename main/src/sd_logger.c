@@ -13,6 +13,7 @@
  *   RAM buffers directly into the non-volatile flash memory to prevent data loss.
  * ==============================================================================
  */
+
 #include "sd_logger.h"
 #include "config.h"
 #include "esp_log.h"
@@ -35,20 +36,35 @@ static sdmmc_card_t *sd_card = NULL;
 static char active_log_filename[64] = "";
 char force_new_file_note[256] = "N/A";
 
-/**
- * @brief RAM cache tracking file size, limits, and GPS coordinate locks.
- */
 typedef struct {
-    long lines;             ///< Number of payload lines in active file
-    bool first_valid_found; ///< Prevents first_record from updating once a fix is locked
-    char first_record[64];  ///< String representing the deployment drop location
-    char last_record[64];   ///< String representing the most recent telemetry
+    long lines;
+    bool first_valid_found;
+    char first_record[64];
+    char last_record[64];
+    
+    // Sensor Statistics Tracking
+    float t_min, t_sum, t_max;
+    float rh_min, rh_sum, rh_max;
+    float p_min, p_sum, p_max;
+    float v_min, v_sum, v_max;
+    long sensor_count;
 } log_meta_t;
-static log_meta_t current_meta = {0, false, "N/A", "N/A"};
 
-/**
- * @brief Utility function to cleanly format bytes into KB, MB, or GB.
- */
+static log_meta_t current_meta = {0};
+
+static void reset_meta_stats(void) {
+    current_meta.lines = 0; 
+    current_meta.first_valid_found = false;
+    strcpy(current_meta.first_record, "N/A"); 
+    strcpy(current_meta.last_record, "N/A");
+    
+    current_meta.t_min = 9999.0f; current_meta.t_max = -9999.0f; current_meta.t_sum = 0.0f;
+    current_meta.rh_min = 9999.0f; current_meta.rh_max = -9999.0f; current_meta.rh_sum = 0.0f;
+    current_meta.p_min = 9999.0f; current_meta.p_max = -9999.0f; current_meta.p_sum = 0.0f;
+    current_meta.v_min = 9999.0f; current_meta.v_max = -9999.0f; current_meta.v_sum = 0.0f;
+    current_meta.sensor_count = 0;
+}
+
 static void auto_format_bytes(uint64_t bytes, char *out_str, size_t max_len) {
     const char *units[] = {"B", "KB", "MB", "GB", "TB"};
     int unit_idx = 0;
@@ -64,9 +80,6 @@ static void auto_format_bytes(uint64_t bytes, char *out_str, size_t max_len) {
     }
 }
 
-/**
- * @brief Directly queries FatFs for cluster allocation (bypasses POSIX VFS path lookup)
- */
 static bool get_sd_capacity_strings(char *total_str, char *used_str, char *free_str, size_t str_len) {
     FATFS *fs;
     DWORD fre_clust;
@@ -94,37 +107,29 @@ static bool get_sd_capacity_strings(char *total_str, char *used_str, char *free_
     return true;
 }
 
-/**
- * @brief Extracts position strings for the dashboard UI metadata tracker.
- */
 static void extract_metadata_record(gps_msg_t *msg, char* dest) {
     snprintf(dest, 64, "%02d/%02d/%02d %02d:%02d:%02d Lat: %.5f Lon: %.5f", 
              msg->month, msg->day, msg->year, msg->hour, msg->min, msg->sec, msg->lat, msg->lon);
 }
 
-/**
- * @brief Commits RAM metadata cache to physical SD `.META` file for rapid Web Server reads.
- */
 static void save_metadata(void) {
     if (strlen(active_log_filename) == 0) return;
     char meta_path[128];
-    int base_len = strlen(active_log_filename) - 4; // Strip extension
+    int base_len = strlen(active_log_filename) - 4;
     snprintf(meta_path, sizeof(meta_path), "%s/%.*s_meta.txt", META_DIR, base_len, active_log_filename);
     FILE *fm = fopen(meta_path, "w");
     if (fm) {
         fprintf(fm, "%ld\n%s\n%s\n", current_meta.lines, current_meta.first_record, current_meta.last_record);
+        fprintf(fm, "%.2f,%.2f,%.2f,%ld\n", current_meta.t_min, current_meta.t_sum, current_meta.t_max, current_meta.sensor_count);
+        fprintf(fm, "%.2f,%.2f,%.2f\n", current_meta.rh_min, current_meta.rh_sum, current_meta.rh_max);
+        fprintf(fm, "%.2f,%.2f,%.2f\n", current_meta.p_min, current_meta.p_sum, current_meta.p_max);
+        fprintf(fm, "%.2f,%.2f,%.2f\n", current_meta.v_min, current_meta.v_sum, current_meta.v_max);
         fclose(fm);
     }
 }
 
-/**
- * @brief Restores metadata into RAM when a file is reopened (appending).
- */
 static void load_metadata(void) {
-    current_meta.lines = 0; 
-    current_meta.first_valid_found = false;
-    strcpy(current_meta.first_record, "N/A"); 
-    strcpy(current_meta.last_record, "N/A");
+    reset_meta_stats();
     
     if (strlen(active_log_filename) == 0) return;
     char meta_path[128];
@@ -138,20 +143,22 @@ static void load_metadata(void) {
             buf[strcspn(buf, "\r\n")] = '\0'; 
             strncpy(current_meta.first_record, buf, 63); 
             if (strstr(current_meta.first_record, "Lat: 0.00000") == NULL && strlen(current_meta.first_record) > 10) {
-                current_meta.first_valid_found = true; // Lock the first valid drop point
+                current_meta.first_valid_found = true; 
             }
         }
         if (fgets(buf, sizeof(buf), fm)) { 
             buf[strcspn(buf, "\r\n")] = '\0'; 
             strncpy(current_meta.last_record, buf, 63); 
         }
+        if (fgets(buf, sizeof(buf), fm)) sscanf(buf, "%f,%f,%f,%ld", &current_meta.t_min, &current_meta.t_sum, &current_meta.t_max, &current_meta.sensor_count);
+        if (fgets(buf, sizeof(buf), fm)) sscanf(buf, "%f,%f,%f", &current_meta.rh_min, &current_meta.rh_sum, &current_meta.rh_max);
+        if (fgets(buf, sizeof(buf), fm)) sscanf(buf, "%f,%f,%f", &current_meta.p_min, &current_meta.p_sum, &current_meta.p_max);
+        if (fgets(buf, sizeof(buf), fm)) sscanf(buf, "%f,%f,%f", &current_meta.v_min, &current_meta.v_sum, &current_meta.v_max);
+        
         fclose(fm);
     }
 }
 
-/**
- * @brief Creates a chronological filename utilizing collision protection (suffix _1).
- */
 static void get_timestamp_filename(char *filename_out, size_t max_len) {
     time_t now; time(&now);
     struct tm timeinfo; gmtime_r(&now, &timeinfo);
@@ -163,7 +170,7 @@ static void get_timestamp_filename(char *filename_out, size_t max_len) {
              timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
     
     char candidate[128]; 
-    snprintf(candidate, sizeof(candidate), "%s.dat", base_name);
+    snprintf(candidate, sizeof(candidate), "%s.txt", base_name);
     
     char full_path[256];
     snprintf(full_path, sizeof(full_path), "%s/%s", DATA_DIR, candidate);
@@ -174,7 +181,7 @@ static void get_timestamp_filename(char *filename_out, size_t max_len) {
     } else {
         int suffix = 1;
         while (1) {
-            snprintf(candidate, sizeof(candidate), "%s_%d.dat", base_name, suffix);
+            snprintf(candidate, sizeof(candidate), "%s_%d.txt", base_name, suffix);
             snprintf(full_path, sizeof(full_path), "%s/%s", DATA_DIR, candidate);
             if (stat(full_path, &st) != 0) break;
             suffix++;
@@ -185,7 +192,7 @@ static void get_timestamp_filename(char *filename_out, size_t max_len) {
 
 esp_err_t init_sd_card(void) {
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false, // Critical: Never format user's data autonomously
+        .format_if_mount_failed = false, 
         .max_files = 5, 
         .allocation_unit_size = 16 * 1024
     };
@@ -206,7 +213,10 @@ esp_err_t init_sd_card(void) {
     }
     
     ESP_LOGI(TAG, "SD Card mounted successfully.");
-    mkdir(DATA_DIR, 0777); mkdir(META_DIR, 0777); 
+    mkdir(DATA_DIR, 0777); 
+    mkdir(META_DIR, 0777); 
+    mkdir(MOUNT_POINT "/.WEB", 0777); 
+    
     return ESP_OK;
 }
 
@@ -220,14 +230,13 @@ void cleanup_orphaned_metadata(void) {
         if (ext_ptr != NULL) {
             char data_filename[64];
             size_t base_len = ext_ptr - ent->d_name;
-            snprintf(data_filename, sizeof(data_filename), "%.*s.dat", (int)base_len, ent->d_name);
+            snprintf(data_filename, sizeof(data_filename), "%.*s.txt", (int)base_len, ent->d_name);
             
             char data_path[300]; snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, data_filename);
             struct stat st;
-            if (stat(data_path, &st) != 0) { // If the core .dat file is missing...
+            if (stat(data_path, &st) != 0) { 
                 char meta_path[300]; snprintf(meta_path, sizeof(meta_path), "%s/%s", META_DIR, ent->d_name);
-                ESP_LOGI(TAG, "Orphaned metadata detected. Deleting: %s", meta_path);
-                unlink(meta_path); // ...delete the orphaned metadata file
+                unlink(meta_path); 
             }
         }
     }
@@ -236,8 +245,8 @@ void cleanup_orphaned_metadata(void) {
 
 void gps_log_task(void *arg) {
     gps_msg_t msg; 
-    FILE *f = NULL;      // Pointer for GPSDATA file
-    FILE *f_bme = NULL;  // Pointer for BMEDATA companion file
+    FILE *f = NULL;      
+    FILE *f_bme = NULL;  
     char active_bme_filename[64] = "";
     
     TickType_t last_sync_time = xTaskGetTickCount();
@@ -250,22 +259,19 @@ void gps_log_task(void *arg) {
     bool threshold_warned = false;
 
     while (1) {
-        // Block until a new GPS telemetry package is provided by the parser
         BaseType_t received = xQueueReceive(gps_queue, &msg, pdMS_TO_TICKS(1000));
         TickType_t current_time = xTaskGetTickCount();
         bool physical_switch_is_logging = (gpio_get_level(LOG_SWITCH_PIN) == 0);
 
-        // --- NEW DEPLOYMENT FILE ROTATION TRIGGER ---
         if (force_new_file_flag) {
             if (f != NULL) { fflush(f); fsync(fileno(f)); fclose(f); f = NULL; }
             if (f_bme != NULL) { fflush(f_bme); fsync(fileno(f_bme)); fclose(f_bme); f_bme = NULL; }
             
             get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
             
-            // Extract core timestamp to link the GPS and BME files together
             char base_timestamp[32] = {0};
             sscanf(active_log_filename, "GPSDATA_%[^.]", base_timestamp);
-            snprintf(active_bme_filename, sizeof(active_bme_filename), "BMEDATA_%s.dat", base_timestamp);
+            snprintf(active_bme_filename, sizeof(active_bme_filename), "BMEDATA_%s.txt", base_timestamp);
             
             char data_path[128]; snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, active_log_filename);
             f = fopen(data_path, "a");
@@ -275,7 +281,7 @@ void gps_log_task(void *arg) {
             if (f_bme) {
                 fseek(f_bme, 0, SEEK_END);
                 if (ftell(f_bme) == 0) {
-                    fprintf(f_bme, "Timestamp,Temperature(C),Humidity(%%),Pressure(hPa),Voltage(V)\n");
+                    fprintf(f_bme, "Timestamp,Temperature(C),Humidity(%%),Pressure(mbar),Voltage(V)\n");
                 }
             }
 
@@ -287,8 +293,7 @@ void gps_log_task(void *arg) {
             FILE *note_f = fopen(note_filename, "w");
             if (note_f) { fprintf(note_f, "%s\n", force_new_file_note); fclose(note_f); }
             
-            current_meta.lines = 0; current_meta.first_valid_found = false;
-            strcpy(current_meta.first_record, "N/A"); strcpy(current_meta.last_record, "N/A");
+            reset_meta_stats();
             strcpy(force_new_file_note, "N/A"); 
             
             xSemaphoreTake(live_data_mutex, portMAX_DELAY);
@@ -299,7 +304,6 @@ void gps_log_task(void *arg) {
             printf("\n>>> ROTATED TO NEW DEPLOYMENT LOG: %s\n", active_log_filename);
         }
 
-        // --- HARDWARE SWITCH EDGE DETECTION ---
         if (physical_switch_is_logging && !last_physical_state) {
             printf("\n>>> LOG SWITCH ACTIVE. Waiting 5s to validate...\n\n");
         } else if (!physical_switch_is_logging && last_physical_state) {
@@ -308,13 +312,11 @@ void gps_log_task(void *arg) {
         }
         last_physical_state = physical_switch_is_logging;
 
-        // --- SWITCH STATE: PAUSED ---
         if (!physical_switch_is_logging) {
             resume_start_tick = 0; 
             if (logical_logging_state) {
                 if (pause_start_tick == 0) pause_start_tick = current_time;
                 
-                // If switch remains physically OFF for 5000ms continuously: Halt Logging
                 if ((current_time - pause_start_tick) >= pdMS_TO_TICKS(5000)) {
                     logical_logging_state = false;
                     actual_pause_time = current_time; 
@@ -326,7 +328,6 @@ void gps_log_task(void *arg) {
             } else {
                 uint32_t elapsed_pause_sec = (current_time - actual_pause_time) * portTICK_PERIOD_MS / 1000;
                 
-                // Warn user if pause > 60s (Will trigger new file on resume)
                 if (actual_pause_time > 0 && elapsed_pause_sec >= 60 && !threshold_warned) {
                     char next_file[64]; get_timestamp_filename(next_file, sizeof(next_file));
                     printf("\n*** PAUSE THRESHOLD EXCEEDED (%lu seconds). Resuming logging will create NEW FILE: %s ***\n\n", 
@@ -339,17 +340,14 @@ void gps_log_task(void *arg) {
                     last_reminder_tick = current_time;
                 }
             }
-        // --- SWITCH STATE: LOGGING ---
         } else {
             pause_start_tick = 0; 
             if (!logical_logging_state) {
                 if (resume_start_tick == 0) resume_start_tick = current_time;
                 
-                // If switch remains physically ON for 5000ms continuously: Start Logging
                 if ((current_time - resume_start_tick) >= pdMS_TO_TICKS(5000)) {
                     logical_logging_state = true;
                     
-                    // Trigger rotation if paused for more than 60 seconds
                     if (actual_pause_time > 0 && (current_time - actual_pause_time) > pdMS_TO_TICKS(60000)) {
                         get_timestamp_filename(active_log_filename, sizeof(active_log_filename));
                     } else if (strlen(active_log_filename) == 0) {
@@ -358,17 +356,17 @@ void gps_log_task(void *arg) {
                     
                     char base_timestamp[32] = {0};
                     sscanf(active_log_filename, "GPSDATA_%[^.]", base_timestamp);
-                    snprintf(active_bme_filename, sizeof(active_bme_filename), "BMEDATA_%s.dat", base_timestamp);
+                    snprintf(active_bme_filename, sizeof(active_bme_filename), "BMEDATA_%s.txt", base_timestamp);
 
                     if (sd_card != NULL) {
                         char data_path[128]; snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, active_log_filename);
-                        f = fopen(data_path, "a"); // Append Mode
+                        f = fopen(data_path, "a"); 
                         
                         char bme_path[128]; snprintf(bme_path, sizeof(bme_path), "%s/%s", DATA_DIR, active_bme_filename);
-                        f_bme = fopen(bme_path, "a"); // Append Mode
+                        f_bme = fopen(bme_path, "a"); 
                         
                         if (f != NULL) { 
-                            setvbuf(f, NULL, _IOFBF, 4096); // Set 4KB block size to match FAT32 clusters
+                            setvbuf(f, NULL, _IOFBF, 4096); 
                             load_metadata(); 
                             last_sync_time = current_time; 
                             last_meta_sync_time = current_time; 
@@ -376,11 +374,10 @@ void gps_log_task(void *arg) {
                             fflush(stdout); 
                         }
                         
-                        // Inject CSV header if new BME file
                         if (f_bme != NULL) {
                             fseek(f_bme, 0, SEEK_END);
                             if (ftell(f_bme) == 0) {
-                                fprintf(f_bme, "Timestamp,Temperature(C),Humidity(%%),Pressure(hPa),Voltage(V)\n");
+                                fprintf(f_bme, "Timestamp,Temperature(C),Humidity(%%),Pressure(mbar),Voltage(V)\n");
                             }
                         }
                     }
@@ -388,7 +385,6 @@ void gps_log_task(void *arg) {
             }
         }
 
-        // --- FILE WRITE EXECUTION ---
         if (received == pdTRUE) {
             if (logical_logging_state) { printf("%s  [LOGGING]\n", msg.payload); } 
             else { printf("%s  [PAUSED]\n", msg.payload); }
@@ -401,7 +397,6 @@ void gps_log_task(void *arg) {
             xSemaphoreGive(live_data_mutex);
             
             if (logical_logging_state) {
-                // 1. Write double-line GPS format
                 if (f != NULL) {
                     fprintf(f, "%s\n", msg.payload);
                     current_meta.lines++;
@@ -414,22 +409,53 @@ void gps_log_task(void *arg) {
                     }
                 }
                 
-                // 2. Write CSV BME Sensor format
                 if (f_bme != NULL) {
-                    float t = 0, h = 0, p = 0;
+                    float temp = 0, rh = 0, press = 0, volt = 0;
                     if (sensor_data_mutex) {
                         xSemaphoreTake(sensor_data_mutex, portMAX_DELAY);
-                        t = current_sensor_data.temperature;
-                        h = current_sensor_data.humidity;
-                        p = current_sensor_data.pressure;
+                        temp = current_sensor_data.temperature;
+                        rh = current_sensor_data.humidity;
+                        press = current_sensor_data.pressure;
+                        volt = current_sensor_data.voltage;
                         xSemaphoreGive(sensor_data_mutex);
                     }
-                    // Uses MM/DD/YY HH:MM:SS format to stay uniform with the GPS line
-                    fprintf(f_bme, "%02d/%02d/%02d %02d:%02d:%02d,%.2f,%.2f,%.2f,X V\n", 
-                        msg.month, msg.day, msg.year, msg.hour, msg.min, msg.sec, t, h, p);
+                    
+                    // Update Stats
+                    if (temp < current_meta.t_min) current_meta.t_min = temp;
+                    if (temp > current_meta.t_max) current_meta.t_max = temp;
+                    current_meta.t_sum += temp;
+                    
+                    if (rh < current_meta.rh_min) current_meta.rh_min = rh;
+                    if (rh > current_meta.rh_max) current_meta.rh_max = rh;
+                    current_meta.rh_sum += rh;
+                    
+                    if (press < current_meta.p_min) current_meta.p_min = press;
+                    if (press > current_meta.p_max) current_meta.p_max = press;
+                    current_meta.p_sum += press;
+                    
+                    if (volt < current_meta.v_min) current_meta.v_min = volt;
+                    if (volt > current_meta.v_max) current_meta.v_max = volt;
+                    current_meta.v_sum += volt;
+                    
+                    current_meta.sensor_count++;
+                    
+                    // Always log continuous internal time, ignoring GPS dropouts
+                    time_t now;
+                    struct tm timeinfo;
+                    time(&now);
+                    localtime_r(&now, &timeinfo);
+
+                    int rtc_year  = timeinfo.tm_year % 100; 
+                    int rtc_month = timeinfo.tm_mon + 1;
+                    int rtc_day   = timeinfo.tm_mday;
+                    int rtc_hour  = timeinfo.tm_hour;
+                    int rtc_min   = timeinfo.tm_min;
+                    int rtc_sec   = timeinfo.tm_sec;
+                    
+                    fprintf(f_bme, "%02d/%02d/%02d %02d:%02d:%02d,%.2f,%.2f,%.2f,%.2f\n", 
+                        rtc_month, rtc_day, rtc_year, rtc_hour, rtc_min, rtc_sec, temp, rh, press, volt);
                 }
 
-                // 3. FSYNC FLUSH EVERY 30 SECONDS
                 if ((current_time - last_sync_time) > pdMS_TO_TICKS(30000)) {
                     if (f) { fflush(f); fsync(fileno(f)); }
                     if (f_bme) { fflush(f_bme); fsync(fileno(f_bme)); }
@@ -457,13 +483,12 @@ void gps_tail_task(void *arg) {
     char last_lines[10][MAX_LINE_LEN]; 
     char temp_buf[MAX_LINE_LEN];
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(60000)); // Run every 60 seconds
+        vTaskDelay(pdMS_TO_TICKS(60000)); 
         if (sd_card == NULL || strlen(active_log_filename) == 0) continue;
         char data_path[128]; snprintf(data_path, sizeof(data_path), "%s/%s", DATA_DIR, active_log_filename);
         FILE *f = fopen(data_path, "r");
         if (f == NULL) continue;
         
-        // Jump to end of file and rewind slightly to prevent RAM explosion on large files
         fseek(f, 0, SEEK_END); 
         long size = ftell(f);
         long offset = size > 2500 ? size - 2500 : 0;

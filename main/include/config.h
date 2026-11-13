@@ -66,6 +66,13 @@
 
 // =================--- SHARED RTOS DATA ---=================
 
+// =================--- SENSOR FILTER CONFIG ---=================
+// Global EMA alpha values [0.0 - 1.0]. Lower value = heavier smoothing.
+extern float ema_alpha_temp;
+extern float ema_alpha_rh;
+extern float ema_alpha_press;
+extern float ema_alpha_volt;
+
 /**
  * @brief Discrete telemetry message passed across FreeRTOS task boundaries.
  * 

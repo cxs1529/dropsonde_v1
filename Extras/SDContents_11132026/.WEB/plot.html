@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sensor Data Plot</title>
+    <!-- Load uPlot assets matching exact filenames in /.WEB/ -->
+    <link rel="stylesheet" href="/map_asset?file=uPlot.min.css">
+    <style>
+        :root { 
+            --noaa-dark-blue: #002868; 
+            --noaa-light-blue: #00A9E0; 
+            --noaa-gray: #e1e8f0;
+        }
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f4f6f9; color: #333; }
+        h2 { color: var(--noaa-dark-blue); border-bottom: 3px solid var(--noaa-light-blue); padding-bottom: 10px; margin-top: 0; }
+        .chart-wrapper { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 25px; overflow-x: auto; }
+        #status { font-weight: bold; color: #666; margin-bottom: 20px; padding: 15px; background: #fff; border-radius: 5px; }
+        .uplot { margin-top: 10px; }
+        .info-text { color: #555; font-size: 0.85em; font-weight: bold; text-align: center; margin-top: -10px; }
+    </style>
+</head>
+<body>
+    <h2 id="page-title">Loading Plot...</h2>
+    <div id="status">Fetching sensor data from SD card...</div>
+    
+    <div id="plots-container"></div>
+
+    <script src="/map_asset?file=uPlot.iife.min.js"></script>
+    <script>
+        const charts = [];
+
+        function parseCSV(csv) {
+            const lines = csv.trim().split('\n');
+            if (lines.length < 2) return null;
+            
+            // data[0]=Time, data[1]=Temp, data[2]=RH, data[3]=Press, data[4]=Volt, data[5]=dP/dt, data[6]=dT/dt
+            const data = [[], [], [], [], [], [], []]; 
+            
+            for (let i = 1; i < lines.length; i++) {
+                const cols = lines[i].split(',');
+                if (cols.length < 5) continue;
+                
+                const dtParts = cols[0].trim().split(' ');
+                if (dtParts.length !== 2) continue;
+                const dParts = dtParts[0].split('/');
+                const tParts = dtParts[1].split(':');
+                
+                if (dParts.length !== 3 || tParts.length !== 3) continue;
+                
+                const year = 2000 + parseInt(dParts[2], 10);
+                const month = parseInt(dParts[0], 10) - 1;
+                const day = parseInt(dParts[1], 10);
+                const hour = parseInt(tParts[0], 10);
+                const min = parseInt(tParts[1], 10);
+                const sec = parseInt(tParts[2], 10);
+
+                const ts = Date.UTC(year, month, day, hour, min, sec) / 1000;
+                const temp = parseFloat(cols[1]);
+                const rh   = parseFloat(cols[2]);
+                const press= parseFloat(cols[3]);
+                const volt = parseFloat(cols[4]);
+
+                if (isNaN(ts) || isNaN(temp) || isNaN(rh) || isNaN(press) || isNaN(volt)) continue;
+                
+                data[0].push(ts);
+                data[1].push(temp);
+                data[2].push(rh);
+                data[3].push(press);
+                data[4].push(volt);
+            }
+
+            if (data[0].length === 0) return data;
+
+            // =========================================================================
+            // INFLECTION POINT DETECTION (Rate of Change / Derivatives)
+            // =========================================================================
+            const dpdt = [0]; 
+            const dtdt = [0];
+            
+            // We use an Exponential Moving Average (EMA) to smooth the 1Hz noise.
+            // A raw 1Hz derivative is too spiky to read. alpha = 0.05 gives ~20s smoothing.
+            const alpha = 0.05; 
+            let ema_dp = 0;
+            let ema_dt = 0;
+
+            for (let i = 1; i < data[0].length; i++) {
+                const dt = data[0][i] - data[0][i-1];
+                let inst_dp = 0;
+                let inst_dt = 0;
+                
+                if (dt > 0 && dt < 60) { // Calculate rate if gap is less than 1 minute
+                    inst_dp = (data[3][i] - data[3][i-1]) / dt;
+                    inst_dt = (data[1][i] - data[1][i-1]) / dt;
+                }
+                
+                if (i === 1) {
+                    ema_dp = inst_dp;
+                    ema_dt = inst_dt;
+                } else {
+                    ema_dp = (alpha * inst_dp) + ((1 - alpha) * ema_dp);
+                    ema_dt = (alpha * inst_dt) + ((1 - alpha) * ema_dt);
+                }
+                
+                dpdt.push(ema_dp);
+                dtdt.push(ema_dt);
+            }
+            
+            data[5] = dpdt;
+            data[6] = dtdt;
+
+            return data;
+        }
+
+        function makeChart(title, xData, yData, color, unit, axisSize, msg = "") {
+            const container = document.createElement('div');
+            container.className = 'chart-wrapper';
+            
+            if (msg) {
+                const info = document.createElement('div');
+                info.className = 'info-text';
+                info.innerText = msg;
+                container.appendChild(info);
+            }
+
+            document.getElementById('plots-container').appendChild(container);
+            
+            const plotWidth = Math.max(300, container.clientWidth - 40);
+
+            const opts = {
+                title: `${title} [${unit}]`,
+                width: plotWidth,
+                height: 300,
+                padding: [12, 16, 0, 8],
+                tzDate: ts => uPlot.tzDate(new Date(ts * 1e3), 'UTC'),
+                axes: [
+                    {},
+                    {
+                        size: axisSize,
+                        gap: 6,
+                        values: (u, vals) => vals.map(v => v == null ? '' : v.toFixed(3)) // 3 decimals for derivatives
+                    }
+                ],
+                series: [
+                    {
+                        label: 'Time (UTC)'
+                    },
+                    {
+                        label: title,
+                        stroke: color,
+                        fill: color + "33",
+                        width: 2
+                    }
+                ]
+            };
+            
+            const u = new uPlot(opts, [xData, yData], container);
+            charts.push({ u, container });
+        }
+
+        window.addEventListener('resize', () => {
+            charts.forEach(({ u, container }) => {
+                const newWidth = Math.max(300, container.clientWidth - 40);
+                u.setSize({ width: newWidth, height: 300 });
+            });
+        });
+
+        window.onload = function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const file = urlParams.get('data');
+            
+            if (!file) {
+                document.getElementById('status').innerText = 'Error: No file specified in URL (?data=...)';
+                return;
+            }
+            
+            document.getElementById('page-title').innerText = "Sensor Telemetry: " + file;
+            
+            fetch('/download?file=' + encodeURIComponent(file))
+                .then(response => {
+                    if (!response.ok) throw new Error("File not found on SD Card (" + response.status + ")");
+                    return response.text();
+                })
+                .then(csvText => {
+                    if (typeof uPlot === 'undefined') {
+                        throw new Error("uPlot.iife.min.js failed to load from /.WEB/");
+                    }
+                    document.getElementById('status').style.display = 'none';
+                    const data = parseCSV(csvText);
+                    
+                    if (!data || data[0].length === 0) {
+                        document.getElementById('status').style.display = 'block';
+                        document.getElementById('status').innerText = 'No valid data rows found in ' + file;
+                        return;
+                    }
+                    
+                    makeChart('Temperature',                  data[0], data[1], '#00A9E0', '\u00B0C', 55);
+                    makeChart('Relative Humidity',            data[0], data[2], '#28a745', '%',       55);
+                    makeChart('Internal Air Pressure',        data[0], data[3], '#D13944', 'mbar',    70);
+                    makeChart('Input Voltage',                data[0], data[4], '#ffc107', 'V',       55);
+                    makeChart('Temp Rate of Change (dT/dt)',  data[0], data[6], '#8e24aa', '\u00B0C/s', 70, "Negative during descent, positive during ascent.");
+                    makeChart('Press Rate of Change (dP/dt)', data[0], data[5], '#e65100', 'mbar/s',  70, "Positive during descent, negative during ascent. Zero-crossings (0.000) indicate phase changes: Descent -> Bottom -> Ascent");
+                })
+                .catch(err => {
+                    document.getElementById('status').style.display = 'block';
+                    document.getElementById('status').innerText = 'Error loading plot: ' + err.message;
+                });
+        };
+    </script>
+</body>
+</html>

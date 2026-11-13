@@ -4,27 +4,27 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NOAA/AOML Dropsonde Logger</title>
-    <!-- 
-        NOAA/AOML Dropsonde Dashboard
-        This is an offline Single Page Application (SPA) designed to run exclusively on 
-        the ESP32 web server with zero external dependencies or internet CDNs.
-    -->
     <style>
         :root {
-            /* Standard NOAA Branding Guidelines */
             --noaa-dark-blue: #002868;
             --noaa-light-blue: #00A9E0;
             --noaa-gray: #e1e8f0;
             --noaa-red: #D13944;
             --noaa-green: #28a745;
             --noaa-yellow: #ffc107;
+            
+            /* High Contrast Link Colors */
+            --link-map: #0277bd;
+            --link-read: #2e7d32;
+            --link-dl: #6a1b9a;
+            --link-del: #c62828;
+            --link-plot: #e65100;
         }
 
         body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #f4f6f9; color: #333; }
         h2 { color: var(--noaa-dark-blue); border-bottom: 3px solid var(--noaa-light-blue); padding-bottom: 10px; margin-top: 0; }
         h3 { color: var(--noaa-dark-blue); margin-top: 0; }
 
-        /* General UI layout components */
         .status-banner { padding: 15px; margin-bottom: 15px; border-radius: 5px; font-size: 1.2em; font-weight: bold; text-align: center; color: #fff; transition: background-color 0.4s; }
         .bg-logging { background: var(--noaa-green); }
         .bg-paused { background: var(--noaa-red); }
@@ -33,11 +33,9 @@
         button.btn-deploy { background: var(--noaa-green); font-size: 1.1em; padding: 12px 24px; box-shadow: 0 4px 6px rgba(0,0,0,0.15); border: none; border-radius: 4px; color: #fff; cursor: pointer; font-weight: bold; transition: background 0.2s;}
         button.btn-deploy:hover { background: #218838; }
 
-        /* Health Statistics Box (Smaller font indicating sensor status) */
-        .health-stats-container { display: flex; gap: 15px; margin-bottom: 15px; font-size: 0.85em; flex-wrap: wrap;}
-        .health-stat-box { flex: 1; min-width: 120px; padding: 10px; background: #fff; border-radius: 4px; border: 1px solid #ccc; text-align: center; font-weight: bold; transition: background-color 0.3s; color: var(--noaa-dark-blue); box-shadow: 0 1px 3px rgba(0,0,0,0.1);}
+        .health-stats-container { margin-bottom: 15px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .health-pill { font-size: 0.75em; color: #555; background: #fff; padding: 4px 12px; border-radius: 20px; border: 1px solid #ccc; font-weight: bold; transition: background-color 0.3s; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
 
-        /* Live Telemetry Box */
         .live-box { background: #fff; border-top: 5px solid var(--noaa-dark-blue); padding: 20px; border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); margin-bottom: 25px; }
         .telemetry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-top: 15px; }
         .data-box { background: var(--noaa-gray); padding: 15px; border-radius: 6px; border-left: 4px solid var(--noaa-light-blue); text-align: center; }
@@ -45,11 +43,10 @@
         .data-box .value { font-size: 1.4em; font-family: monospace; color: #111; font-weight: bold; margin-top: 8px; display: block; }
         
         .table-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-        .storage-info { font-size: 0.7em; color: #555; font-weight: normal; margin-left: 10px; background: #fff; padding: 4px 10px; border-radius: 20px; border: 1px solid #ccc; display: inline-block;}
+        .storage-info { font-size: 0.75em; color: #555; font-weight: normal; margin-left: 10px; background: #fff; padding: 4px 10px; border-radius: 20px; border: 1px solid #ccc; display: inline-block;}
         button.btn-refresh { padding: 8px 15px; background: var(--noaa-light-blue); color: #fff; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s; }
         button.btn-refresh:hover { background: var(--noaa-dark-blue); }
 
-        /* Responsive Layout for Table and Metadata Inspector side-by-side */
         .flex-container { display: flex; flex-wrap: wrap; gap: 20px; }
         .table-container { flex: 2; min-width: 450px; }
         .summary-container { flex: 1; min-width: 250px; background: #fff; border: 1px solid #ddd; border-top: 5px solid var(--noaa-light-blue); padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); height: fit-content; position: sticky; top: 20px; }
@@ -60,15 +57,21 @@
         tr.file-row { cursor: pointer; transition: background-color 0.2s; }
         tr.file-row:hover { background-color: var(--noaa-gray); }
         
-        a { color: var(--noaa-dark-blue); text-decoration: none; font-weight: bold;}
-        a:hover { text-decoration: underline; color: var(--noaa-light-blue); }
+        a { text-decoration: none; font-weight: bold; padding: 4px 6px; border-radius: 4px; transition: all 0.2s; display: inline-block; margin: 2px 0;}
+        a:hover { text-decoration: underline; background-color: #f0f0f0; }
+        
+        .link-map { color: var(--link-map); }
+        .link-read { color: var(--link-read); }
+        .link-dl { color: var(--link-dl); }
+        .link-del { color: var(--link-del); }
+        .link-plot { color: var(--link-plot); }
 
         .summary-item { margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px; }
         .summary-item:last-child { border-bottom: none; }
         .summary-label { font-size: 0.85em; color: #666; text-transform: uppercase; font-weight: bold; }
         .summary-value { font-family: monospace; font-size: 1.05em; color: var(--noaa-dark-blue); margin-top: 5px; word-break: break-all; }
+        .summary-stat { font-size: 0.85em; color: #333; margin-top: 2px; }
 
-        /* Modal Overlay configuration */
         .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 1000; align-items: center; justify-content: center; backdrop-filter: blur(2px);}
         .modal-box { background: #fff; padding: 25px; border-radius: 8px; width: 90%; max-width: 450px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); }
         .modal-box h3 { margin-top: 0; border-bottom: 2px solid var(--noaa-gray); padding-bottom: 10px; }
@@ -82,6 +85,8 @@
         .btn-cancel { background: #ccc; padding: 10px 18px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;}
         .btn-save { background: var(--noaa-green); color: white; padding: 10px 18px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;}
         .timeout-warning { color: var(--noaa-red); font-weight: bold; display: none; }
+        
+        .drift-map-container { margin-top: 25px; padding: 20px; background: #fff; border-top: 5px solid var(--noaa-dark-blue); border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
     </style>
 </head>
 <body>
@@ -91,23 +96,20 @@
         STATUS: PAUSED - Waiting for hardware switch...
     </div>
 
-    <!-- Centered Deployment Button -->
     <div class="deploy-container">
         <button class="btn-deploy" onclick="triggerNewDeployment()">+ Start New Deployment File</button>
     </div>
 
     <div class="live-box">
-        <h3 style="margin-bottom: 15px;">Live Telemetry</h3>
+        <h3 style="margin-bottom: 15px; display: inline-block; margin-right: 15px;">Live Telemetry</h3>
         
-        <!-- Dropsonde Health Statistics -->
-        <div class="health-stats-container">
-            <div class="health-stat-box" id="boxTemp">Temp: <span id="valS_Temp">--</span>&deg;C</div>
-            <div class="health-stat-box" id="boxRh">RH: <span id="valS_Rh">--</span>%</div>
-            <div class="health-stat-box" id="boxPress">Press: <span id="valS_Press">--</span> hPa</div>
-            <div class="health-stat-box" id="boxVolt">Volt: <span id="valS_Volt">X V</span></div>
+        <div class="health-stats-container" style="display: inline-flex;">
+            <span class="health-pill" id="boxTemp">T <span id="valS_Temp">--</span> &deg;C</span>
+            <span class="health-pill" id="boxRh">RH <span id="valS_Rh">--</span> %</span>
+            <span class="health-pill" id="boxPress">P <span id="valS_Press">--</span> mbar</span>
+            <span class="health-pill" id="boxVolt">Vin <span id="valS_Volt">--</span> V</span>
         </div>
 
-        <!-- GPS Telemetry Variables -->
         <div class="telemetry-grid">
             <div class="data-box"><span class="label">Date & Time (UTC)</span><span class="value" id="valTime">--/--/-- --:--:--</span></div>
             <div class="data-box"><span class="label">Latitude</span><span class="value" id="valLat">--.------</span></div>
@@ -117,7 +119,6 @@
         </div>
     </div>
 
-    <!-- Table Header Row with Dynamic Storage Metrics -->
     <div class="table-header-row">
         <h3 style="display: flex; align-items: center; margin: 0;">
             Internal Storage 
@@ -126,7 +127,6 @@
         <button class="btn-refresh" onclick="loadFiles()">Refresh File List</button>
     </div>
     
-    <!-- Table and Metadata Container side-by-side -->
     <div class="flex-container">
         <div class="table-container">
             <table id="fileTable">
@@ -140,7 +140,15 @@
         </div>
     </div>
 
-    <!-- Deployment Note Modal (Triggers on new file generation) -->
+    <!-- Active Trajectory Drift Map -->
+    <div class="drift-map-container">
+        <h3 style="color: var(--noaa-dark-blue); margin-top: 0; margin-bottom: 5px;">Deployment Trajectory</h3>
+        <p style="font-size: 0.8em; color: #666; margin-top: 0; margin-bottom: 15px;" id="driftMapSubtitle">Select a data file to view trajectory...</p>
+        <div style="width: 100%; height: 200px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 4px; display: flex; justify-content: center; align-items: center;">
+            <canvas id="driftCanvas" width="800" height="200" style="max-width: 100%; height: 100%; object-fit: contain;"></canvas>
+        </div>
+    </div>
+
     <div id="noteModal" class="modal-overlay">
         <div class="modal-box">
             <h3>New Deployment</h3>
@@ -166,10 +174,9 @@
         let typingTimer;
         let countdownInterval;
         let countdownSeconds = 60;
+        let activeFile = "";
+        let isPollingLive = false;
 
-        /**
-         * @brief Formats raw bytes dynamically into human readable strings.
-         */
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
             const k = 1024;
@@ -178,9 +185,6 @@
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
-        /**
-         * @brief Injects the clicked deployment's metadata dynamically into the sidebar panel.
-         */
         function showSummary(fileName) {
             let d = fileDataMap[fileName];
             if(!d) return;
@@ -189,6 +193,11 @@
             let safeFirst = d.first || "N/A";
             let safeLast = d.last || "N/A";
             let safeNote = d.note || "N/A";
+            
+            let tStats = d.t_stats || [0,0,0];
+            let rhStats = d.rh_stats || [0,0,0];
+            let pStats = d.p_stats || [0,0,0];
+            let vStats = d.v_stats || [0,0,0];
 
             document.getElementById('summaryPanel').innerHTML = `
                 <h3 style="color:var(--noaa-dark-blue);">${d.name}</h3>
@@ -201,30 +210,34 @@
                     <div class="summary-value">${safeLines}</div>
                 </div>
                 <div class="summary-item">
-                    <div class="summary-label">Initial Timestamp & Position</div>
-                    <div class="summary-value">${safeFirst}</div>
+                    <div class="summary-label">Timestamp Bounds</div>
+                    <div class="summary-stat" style="margin-top: 6px;"><b>Start:</b> ${safeFirst}</div>
+                    <div class="summary-stat"><b>End:</b> ${safeLast}</div>
                 </div>
                 <div class="summary-item">
-                    <div class="summary-label">Final Timestamp & Position</div>
-                    <div class="summary-value">${safeLast}</div>
+                    <div class="summary-label">Sensor Statistics (Min / Avg / Max)</div>
+                    <div class="summary-stat" style="margin-top: 6px;"><b>T (&deg;C):</b> ${tStats[0].toFixed(2)} / ${tStats[1].toFixed(2)} / ${tStats[2].toFixed(2)}</div>
+                    <div class="summary-stat"><b>RH (%):</b> ${rhStats[0].toFixed(2)} / ${rhStats[1].toFixed(2)} / ${rhStats[2].toFixed(2)}</div>
+                    <div class="summary-stat"><b>P (mbar):</b> ${pStats[0].toFixed(2)} / ${pStats[1].toFixed(2)} / ${pStats[2].toFixed(2)}</div>
+                    <div class="summary-stat"><b>Vin (V):</b> ${vStats[0].toFixed(2)} / ${vStats[1].toFixed(2)} / ${vStats[2].toFixed(2)}</div>
                 </div>
             `;
+            
+            // Plot the newly selected file's trajectory
+            updateDriftMap(fileName);
         }
 
-        /**
-         * @brief Queries the ESP32 for total available FAT32 clusters.
-         */
         function updateStorageMetrics() {
             document.getElementById('storageMetrics').innerText = "Calculating storage...";
             document.getElementById('storageMetrics').style.color = "#888";
             
-            fetch('/api/storage')
+            return fetch('/api/storage')
             .then(r => r.text()) 
             .then(text => {
                 try {
                     let d = JSON.parse(text);
                     if (d.total === 0) {
-                        document.getElementById('storageMetrics').innerText = "Storage metrics unavailable (Check Mount Path)";
+                        document.getElementById('storageMetrics').innerText = "Storage metrics unavailable";
                     } else {
                         document.getElementById('storageMetrics').innerText = 
                             `Total: ${formatBytes(d.total)} | Used: ${formatBytes(d.used)} | Free: ${formatBytes(d.free)}`;
@@ -238,17 +251,120 @@
             });
         }
 
-        /**
-         * @brief Builds the core file list table by requesting the array from the C web_server.c endpoint.
-         * The backend automatically clusters BMEDATA onto the same row as GPSDATA.
-         */
-        function loadFiles() {
-            updateStorageMetrics();
+        // --- Efficient Canvas Drift Map Logic ---
+        function drawCanvasMap(pts) {
+            const canvas = document.getElementById('driftCanvas');
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width;
+            const h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            
+            if (pts.length === 0) return;
+            
+            let minLat = Infinity, maxLat = -Infinity;
+            let minLon = Infinity, maxLon = -Infinity;
+            
+            pts.forEach(p => {
+                if (p.lat < minLat) minLat = p.lat;
+                if (p.lat > maxLat) maxLat = p.lat;
+                if (p.lon < minLon) minLon = p.lon;
+                if (p.lon > maxLon) maxLon = p.lon;
+            });
 
+            // Add 10% bounding box padding
+            const latPad = (maxLat - minLat) * 0.1 || 0.0005;
+            const lonPad = (maxLon - minLon) * 0.1 || 0.0005;
+            minLat -= latPad; maxLat += latPad;
+            minLon -= lonPad; maxLon += lonPad;
+            
+            const getX = lon => ((lon - minLon) / (maxLon - minLon)) * w;
+            const getY = lat => h - ((lat - minLat) / (maxLat - minLat)) * h;
+
+            // Draw trajectory path
+            ctx.beginPath();
+            ctx.strokeStyle = '#00A9E0';
+            ctx.lineWidth = 2.5;
+            ctx.lineJoin = 'round';
+            pts.forEach((p, i) => {
+                const x = getX(p.lon);
+                const y = getY(p.lat);
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            if (pts.length > 0) {
+                const start = pts[0];
+                const end = pts[pts.length - 1];
+                
+                // Start marker (Green)
+                ctx.fillStyle = '#28a745';
+                ctx.beginPath();
+                ctx.arc(getX(start.lon), getY(start.lat), 5, 0, Math.PI * 2);
+                ctx.fill();
+
+                // End/Current marker (Red)
+                ctx.fillStyle = '#D13944';
+                ctx.beginPath();
+                ctx.arc(getX(end.lon), getY(end.lat), 5, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function updateDriftMap(fileName) {
+            if (!fileName) return;
+            const subtitle = document.getElementById('driftMapSubtitle');
+            subtitle.innerText = `Loading trajectory from ${fileName}...`;
+            
+            fetch('/download?file=' + encodeURIComponent(fileName))
+            .then(r => r.text())
+            .then(text => {
+                const lines = text.split('\n');
+                const validPts = [];
+                // Matches standard NMEA parsing line: e.g. "28 24.737549N  081 14.237305W ... FIX TYPE: 3"
+                const regex = /(\d{1,3})\s+(\d+\.\d+)([NS])\s+(\d{1,3})\s+(\d+\.\d+)([EW]).*FIX TYPE:\s*([2-9])/;
+                
+                for (let i = 0; i < lines.length; i++) {
+                    const match = lines[i].match(regex);
+                    if (match) {
+                        const lat = (parseInt(match[1], 10) + parseFloat(match[2])/60) * (match[3] === 'S' ? -1 : 1);
+                        const lon = (parseInt(match[4], 10) + parseFloat(match[5])/60) * (match[6] === 'W' ? -1 : 1);
+                        validPts.push({lat, lon});
+                    }
+                }
+
+                if (validPts.length === 0) {
+                    subtitle.innerText = `${fileName} - No valid 2D/3D fixes found.`;
+                    drawCanvasMap([]);
+                    return;
+                }
+
+                let step = 1;
+                if (validPts.length >= 1000) step = 100;
+                else if (validPts.length >= 10) step = 10;
+                
+                const plottedPts = validPts.filter((_, i) => i % step === 0);
+                // Ensure the final current position is always plotted
+                if (plottedPts[plottedPts.length - 1] !== validPts[validPts.length - 1]) {
+                    plottedPts.push(validPts[validPts.length - 1]);
+                }
+
+                subtitle.innerText = `${fileName} - Plotting ${plottedPts.length} points (Decimation: 1/${step}).`;
+                drawCanvasMap(plottedPts);
+            })
+            .catch(e => {
+                subtitle.innerText = `Failed to load trajectory for ${fileName}.`;
+            });
+        }
+        // ------------------------------------------
+
+        function loadFiles() {
             fetch('/api/list').then(r => r.json()).then(data => {
                 if (!Array.isArray(data)) data = [];
                 
                 data.sort((a, b) => {
+                    if (a.name === activeFile) return -1;
+                    if (b.name === activeFile) return 1;
                     if (a.name > b.name) return -1;
                     if (a.name < b.name) return 1;
                     return 0;
@@ -261,17 +377,24 @@
                     fileDataMap[f.name] = f;
                     let bmeName = f.name.replace("GPSDATA", "BMEDATA");
                     
+                    let delLink = "";
+                    if (f.name === activeFile) {
+                        delLink = `<span style="color:#aaa; cursor:default; padding: 4px 6px; display:inline-block; margin: 2px 0;">Active</span>`;
+                    } else {
+                        delLink = `<a href="#" class="link-del" onclick="deleteFile('${f.name}', event)">Delete</a>`;
+                    }
+
                     html += `<tr class="file-row" onclick="showSummary('${f.name}')">
                     <td>${f.name}</td><td>${(f.size / 1024).toFixed(1)} KB</td>
                     <td>
-                        <a href="/map_asset?file=viewer.html&data=${f.name}" target="_blank" style="color:var(--noaa-dark-blue);" onclick="event.stopPropagation()">Map</a> | 
-                        <a href="/view?file=${f.name}" target="_blank" style="color:var(--noaa-green);" onclick="event.stopPropagation()">Read</a> | 
-                        <a href="/download?file=${f.name}" download="${f.name}" onclick="event.stopPropagation()">DL</a> | 
-                        <a href="#" id="del-${f.name}" onclick="deleteFile('${f.name}', event)" style="color:var(--noaa-red);">Del</a>
+                        <a href="/map_asset?file=viewer.html&data=${f.name}" class="link-map" target="_blank" onclick="event.stopPropagation()">Map</a> | 
+                        <a href="/view?file=${f.name}" class="link-read" target="_blank" onclick="event.stopPropagation()">Read</a> | 
+                        <a href="/download?file=${f.name}" class="link-dl" download="${f.name}" onclick="event.stopPropagation()">Download</a> | 
+                        ${delLink}
                     </td>
                     <td>
-                        <a href="/download?file=${bmeName}" download="${bmeName}" onclick="event.stopPropagation()">DL</a> | 
-                        <a href="/map_asset?file=plot.html&data=${bmeName}" target="_blank" style="color:var(--noaa-dark-blue);" onclick="event.stopPropagation()">Plot</a>
+                        <a href="/map_asset?file=plot.html&data=${bmeName}" class="link-plot" target="_blank" onclick="event.stopPropagation()">Plot</a> |
+                        <a href="/download?file=${bmeName}" class="link-dl" download="${bmeName}" onclick="event.stopPropagation()">Download</a> 
                     </td></tr>`;
                 });
                 
@@ -282,13 +405,18 @@
                 } else {
                     document.getElementById('summaryPanel').innerHTML = `
                         <h3 style="color:var(--noaa-dark-blue);">File Metadata</h3>
-                        <p style="color:#666;">No valid .dat files found in DATA directory.</p>
+                        <p style="color:#666;">No valid .txt files found in DATA directory.</p>
                     `;
+                    document.getElementById('driftMapSubtitle').innerText = "No data available.";
+                    drawCanvasMap([]);
                 }
-            }).catch(e => console.error("Error fetching file list: ", e));
+            })
+            .catch(e => console.error("Error fetching file list: ", e))
+            .finally(() => {
+                updateStorageMetrics();
+            });
         }
 
-        // --- Timeout & Modal Logic ---
         function triggerNewDeployment() {
             document.getElementById('noteModal').style.display = 'flex';
             let ta = document.getElementById('deployNote');
@@ -310,7 +438,6 @@
             resetTimers();
         });
 
-        // Auto-save logic preventing the device from freezing if the operator walks away mid-typing
         function resetTimers() {
             clearTimeout(typingTimer);
             clearInterval(countdownInterval);
@@ -364,7 +491,6 @@
             const file = fileInput.files[0];
             if (!file) return;
 
-            // Restrict bad uploads client-side
             if (!file.name.toLowerCase().endsWith('.csv')) {
                 alert("Please select a valid targets.csv file.");
                 fileInput.value = ""; 
@@ -383,9 +509,10 @@
             });
         }
 
-        // --- Fast Polling Live Data ---
-        // Runs every 500ms to mimic real-time reactivity without websockets
-        setInterval(() => {
+        function pollLiveTelemetry() {
+            if (isPollingLive) return;
+            isPollingLive = true;
+
             fetch('/api/live').then(r => r.json()).then(d => {
                 document.getElementById('valTime').innerText = `${d.date} ${d.time}`;
                 document.getElementById('valLat').innerText = d.lat;
@@ -393,27 +520,33 @@
                 document.getElementById('valPdop').innerText = d.pdop;
                 document.getElementById('valFix').innerText = d.fix;
                 
-                // Color Logic for Health Stats (Evaluated dynamically)
                 let t = parseFloat(d.temp);
                 let h = parseFloat(d.rh);
                 let p = parseFloat(d.press);
                 
                 let tColor = '#fff';
-                if(t < 15) tColor = '#add8e6';
-                else if(t >= 30 && t <= 35) tColor = '#ffcc80';
-                else if(t > 40) tColor = '#ff9999';
+                let tText = '#555';
+                if(t < 15) { tColor = '#add8e6'; tText = '#000'; }
+                else if(t >= 30 && t <= 35) { tColor = '#ffcc80'; tText = '#000'; }
+                else if(t > 40) { tColor = '#ff9999'; tText = '#000'; }
                 
                 let hColor = '#fff';
-                if(h >= 65 && h <= 85) hColor = '#ffcc80';
-                else if(h > 85) hColor = '#ff9999';
+                let hText = '#555';
+                if(h >= 65 && h <= 85) { hColor = '#ffcc80'; hText = '#000'; }
+                else if(h > 85) { hColor = '#ff9999'; hText = '#000'; }
                 
                 let pColor = '#fff';
-                if(p > 850) pColor = '#ff9999';
-                else if(p > 700) pColor = '#ffcc80';
+                let pText = '#555';
+                if(p > 850) { pColor = '#ff9999'; pText = '#000'; }
+                else if(p > 700) { pColor = '#ffcc80'; pText = '#000'; }
                 
-                document.getElementById('boxTemp').style.backgroundColor = tColor;
-                document.getElementById('boxRh').style.backgroundColor = hColor;
-                document.getElementById('boxPress').style.backgroundColor = pColor;
+                let bT = document.getElementById('boxTemp');
+                let bRh = document.getElementById('boxRh');
+                let bP = document.getElementById('boxPress');
+
+                bT.style.backgroundColor = tColor; bT.style.color = tText;
+                bRh.style.backgroundColor = hColor; bRh.style.color = hText;
+                bP.style.backgroundColor = pColor; bP.style.color = pText;
                 
                 document.getElementById('valS_Temp').innerText = d.temp;
                 document.getElementById('valS_Rh').innerText = d.rh;
@@ -428,29 +561,25 @@
                     banner.className = 'status-banner bg-paused';
                     banner.innerText = 'STATUS: PAUSED - Storage Halted';
                 }
+                
+                if (activeFile !== d.active_file) {
+                    activeFile = d.active_file;
+                    loadFiles();
+                }
+            })
+            .catch(e => {})
+            .finally(() => {
+                isPollingLive = false;
+                setTimeout(pollLiveTelemetry, 500);
+            });
+        }
 
-                // Prevent users from deleting the file that is currently locked by the SD writer
-                Object.values(fileDataMap).forEach(f => {
-                    let delBtn = document.getElementById('del-' + f.name);
-                    if (delBtn) {
-                        if (f.name === d.active_file) {
-                            delBtn.style.color = '#aaa';
-                            delBtn.style.pointerEvents = 'none';
-                            delBtn.innerText = 'Active';
-                        } else {
-                            delBtn.style.color = 'var(--noaa-red)';
-                            delBtn.style.pointerEvents = 'auto';
-                            delBtn.innerText = 'Del';
-                        }
-                    }
-                });
-            }).catch(e => {});
-        }, 500);
-
-        window.onload = loadFiles;
+        window.onload = function() {
+            loadFiles();
+            setTimeout(pollLiveTelemetry, 400);
+        };
     </script>
 
-    <!-- Map Targets Configuration Bottom Section -->
     <div style="margin-top: 25px; padding: 20px; background: #fff; border-top: 5px solid var(--noaa-dark-blue); border-radius: 5px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); text-align: center;">
         <h3 style="color: var(--noaa-dark-blue); margin-top: 0; margin-bottom: 15px;">Map Targets</h3>
         <div style="display: flex; justify-content: center; gap: 15px;">
@@ -460,7 +589,6 @@
         </div>
     </div>
 
-    <!-- Official PDF Plan Route -->
     <div style="margin-top: 25px; margin-bottom: 40px; text-align: center;">
         <a href="/map_asset?file=plan.html" target="_blank" style="display: inline-block; background: var(--noaa-green); padding: 12px 24px; color: #fff; border-radius: 4px; text-decoration: none; font-weight: bold; font-size: 1.1em; box-shadow: 0 4px 6px rgba(0,0,0,0.15); transition: background 0.2s;">Dropsonde Plan and Instructions</a>
     </div>

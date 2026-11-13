@@ -126,10 +126,8 @@ static bool handle_rmc_sentence(const char *line) {
     gps_msg_t msg = {0};
 
     // --- OS RTC SYNC ---
-    // Even if satellites haven't triangulated a position yet, the GPS module's 
-    // internal battery-backed RTC usually transmits the correct UTC date and time.
-    // We immediately lock the ESP32's system clock to this time so the SD file manager 
-    // can generate the correct chronological filename.
+    // Synchronize the ESP32's internal RTC immediately when valid GPS time is received,
+    // so the BMEDATA logger can maintain accurate time when the GPS fix drops.
     if (frame.date.year > 0) {
         struct tm t = {0};
         t.tm_year = frame.date.year + 100; // Convert 2-digit year to POSIX year

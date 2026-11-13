@@ -5,7 +5,7 @@
 # ==============================================================================
 
 idf_component_register(
-    SRCS "src/main.c" "src/minmea.c" "src/gps_parser.c" "src/sd_logger.c" "src/web_server.c" "src/dns_server.c" "src/bmp280.c" "src/sensor_task.c"
+    SRCS "src/main.c" "src/minmea.c" "src/gps_parser.c" "src/sd_logger.c" "src/web_server.c" "src/dns_server.c" "src/bmp280.c" "src/sensor_task.c" "src/ema_filter.c"
     INCLUDE_DIRS "include"
     EMBED_TXTFILES "index.html"
     EMBED_FILES "favicon.ico"
