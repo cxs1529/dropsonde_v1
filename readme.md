@@ -86,7 +86,13 @@ Included in the `Extras` directory are tools for testing and visualization:
 
 ## Images
 ### Main Dashboard
-<img width="959" height="414" alt="dashboard" src="https://github.com/user-attachments/assets/7e0e673c-40cb-4d49-9344-bcde026770c0" />
+<img width="959" height="413" alt="dashboard_1" src="https://github.com/user-attachments/assets/eafaaaec-69a1-4121-84b1-2facc4efaae4" />
+<img width="959" height="413" alt="dashboard_2" src="https://github.com/user-attachments/assets/feb8b5d4-31b8-4016-b24b-a93ab6e8210a" />
+
+### Sensor Plots
+<img width="959" height="410" alt="plot_1" src="https://github.com/user-attachments/assets/8ee7039d-e608-4664-b96c-164a013b3e92" />
+<img width="959" height="411" alt="plot_2" src="https://github.com/user-attachments/assets/93380173-99e1-46cd-8303-700f54a51312" />
+<img width="958" height="332" alt="plot_3" src="https://github.com/user-attachments/assets/96cd39d8-e11c-4a27-bdfd-945dbd208773" />
 
 ### New Deployment
 <img width="959" height="334" alt="new-deployment-notes" src="https://github.com/user-attachments/assets/6b441f4d-f643-4b3b-ab17-5c1759081c30" />
